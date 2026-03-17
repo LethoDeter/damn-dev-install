@@ -255,7 +255,7 @@ ENV_EOF
 
 start_containers() {
   info "Pulling latest damn.dev images..."
-  $COMPOSE_CMD -f "$DAMN_DEV_DIR/docker-compose.local.yml" pull backend frontend openclaw
+  $COMPOSE_CMD -f "$DAMN_DEV_DIR/docker-compose.local.yml" pull backend frontend
 
   info "Starting containers..."
   $COMPOSE_CMD -f "$DAMN_DEV_DIR/docker-compose.local.yml" up -d
