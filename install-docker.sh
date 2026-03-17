@@ -15,7 +15,7 @@ OPENCLAW_DIR="$HOME/.openclaw"
 PORT="${PORT:-5174}"
 DOMAIN=""
 INSTALL_BASE_URL="https://raw.githubusercontent.com/LethoDeter/damn-dev-install/main"
-GHCR_OWNER="anthonylevy"
+GHCR_OWNER="lethodeter"
 
 mkdir -p "$DAMN_DEV_DIR" "$OPENCLAW_DIR"
 
