@@ -80,9 +80,12 @@ install_openclaw() {
   cat > "$OPENCLAW_DIR/openclaw.json" << OPENCLAW_EOF
 {
   "gateway": {
-    "token": "${OPENCLAW_TOKEN}",
+    "auth": { "token": "${OPENCLAW_TOKEN}" },
     "bind": "loopback",
-    "mode": "local"
+    "mode": "local",
+    "controlUi": {
+      "allowedOrigins": ["http://localhost:18789", "http://127.0.0.1:18789"]
+    }
   },
   "bindings": [
     {
@@ -100,7 +103,6 @@ install_openclaw() {
   },
   "hooks": {
     "allowedAgentIds": [],
-    "webhookUrl": "http://localhost:3001/webhooks/openclaw",
     "token": "${OPENCLAW_TOKEN}"
   },
   "plugins": {

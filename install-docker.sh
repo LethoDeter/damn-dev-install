@@ -126,9 +126,12 @@ write_openclaw_config() {
   cat > "$OPENCLAW_DIR/openclaw.json" << OPENCLAW_EOF
 {
   "gateway": {
-    "token": "${OPENCLAW_TOKEN}",
+    "auth": { "token": "${OPENCLAW_TOKEN}" },
     "bind": "lan",
-    "mode": "local"
+    "mode": "local",
+    "controlUi": {
+      "allowedOrigins": ["http://localhost:18789", "http://127.0.0.1:18789"]
+    }
   },
   "bindings": [
     {
@@ -146,7 +149,6 @@ write_openclaw_config() {
   },
   "hooks": {
     "allowedAgentIds": [],
-    "webhookUrl": "http://host.docker.internal:3001/webhooks/openclaw",
     "token": "${OPENCLAW_TOKEN}"
   },
   "plugins": {
