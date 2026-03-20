@@ -161,7 +161,6 @@ install_damn_dev() {
   fi
 
   cat > "$DAMN_DEV_DIR/.env" << ENV_EOF
-PORT=${PORT}
 DATABASE_URL=file:${DAMN_DEV_DIR}/damn.db
 OPENCLAW_URL=http://localhost:18789
 OPENCLAW_TOKEN=${OPENCLAW_TOKEN}

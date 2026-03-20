@@ -242,7 +242,6 @@ write_env() {
   fi
 
   cat > "$DAMN_DEV_DIR/.env" << ENV_EOF
-PORT=${PORT}
 DATABASE_URL=file:/data/damn.db
 OPENCLAW_URL=http://openclaw:18789
 OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
