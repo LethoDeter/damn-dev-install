@@ -205,6 +205,8 @@ services:
       - ${DAMN_DEV_DIR}:/data
     env_file:
       - ${DAMN_DEV_DIR}/.env
+    environment:
+      REGISTRATION_MODE: \${REGISTRATION_MODE:-closed}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -248,6 +250,7 @@ OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
 BETTER_AUTH_SECRET=${better_auth_secret}
 DOMAIN=${DOMAIN}
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
+REGISTRATION_MODE=closed
 DAMN_DEV_VERSION_URL=${INSTALL_BASE_URL}/version.json
 ENV_EOF
 }
