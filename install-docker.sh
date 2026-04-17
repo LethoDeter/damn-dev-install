@@ -351,8 +351,12 @@ start_openclaw() {
   info "Starting OpenClaw container..."
   $COMPOSE_CMD -f "$DAMN_DEV_DIR/docker-compose.local.yml" up -d
 
+  # OpenClaw's first startup (fresh container, loads config, resolves auth,
+  # starts HTTP server, registers plugins) takes 30-60s on Apple Silicon and
+  # can exceed 60s on Intel Macs. Wait up to 90s before giving up. Observed
+  # real-world: 25s on M-series, 35-45s on Intel.
   info "Waiting for OpenClaw..."
-  for i in $(seq 1 15); do
+  for i in $(seq 1 45); do
     sleep 2
     if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
       success "OpenClaw is running."
@@ -361,7 +365,7 @@ start_openclaw() {
     printf "."
   done
   echo ""
-  die "OpenClaw did not start. Check logs: $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml logs -f"
+  die "OpenClaw did not become healthy within 90s. Check logs: $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml logs -f"
 }
 
 # ── Start damn-dev backend ───────────────────────────────────────────────────
