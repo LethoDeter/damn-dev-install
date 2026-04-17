@@ -277,6 +277,14 @@ services:
     volumes:
       - ${OPENCLAW_DIR}:/home/node/.openclaw
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount host's ~/openclaw-plugins over the image-baked copy. Required
+      # because openclaw:hardened bakes the plugin at uid=1000 (image build
+      # user), but the container runs as \${HOST_UID} (e.g. 501 on macOS) via
+      # the 'user' directive above. OpenClaw's plugin loader rejects
+      # "suspicious ownership" (owner != running user && owner != root). The
+      # install script cp's the plugin into ~/openclaw-plugins during install,
+      # so the host dir is owned by the host user — ownership check passes.
+      - ${HOME}/openclaw-plugins:/home/node/openclaw-plugins:ro
     environment:
       - OPENCLAW_GATEWAY_BIND=lan
     env_file:
