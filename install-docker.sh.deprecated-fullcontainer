@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# damn.dev installer — docker-local pattern:
-#   - damn.dev backend runs NATIVELY via @damn-dev/cli (Node 18+)
-#   - OpenClaw runs in a Docker container (openclaw:hardened)
-#
-# Previous versions of this script fully containerized both backend and
-# frontend — that's archived as install-docker.sh.deprecated-fullcontainer.
-# See PRD.md "Install Paths" for the rationale.
-
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -20,7 +12,7 @@ die()     { echo -e "${RED}[damn.dev] ERROR:${RESET} $*" >&2; exit 1; }
 
 DAMN_DEV_DIR="$HOME/.damn-dev"
 OPENCLAW_DIR="$HOME/.openclaw"
-PORT="${PORT:-3001}"
+PORT="${PORT:-5174}"
 DOMAIN=""
 INSTALL_BASE_URL="https://raw.githubusercontent.com/LethoDeter/damn-dev-install/main"
 GHCR_OWNER="lethodeter"
@@ -36,53 +28,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo ""
-echo -e "${BOLD}damn.dev — Docker-local installer${RESET}"
-echo "──────────────────────────────────────"
+echo -e "${BOLD}damn.dev — Docker installer${RESET}"
+echo "──────────────────────────────────"
 echo ""
-
-# ── Old fully-containerized install detection ────────────────────────────────
-# If we see the old damn-dev-backend or damn-dev-frontend containers, guide the
-# user through teardown first. Their data at ~/.damn-dev and ~/.openclaw stays
-# intact — only the old containers + compose file need to go.
-
-detect_old_fullcontainer_install() {
-  local found=""
-  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qE '^(damn-dev-backend|damn-dev-frontend)$'; then
-    found="yes"
-  fi
-  if [[ -z "$found" ]]; then return 0; fi
-
-  echo -e "${BOLD}Previous fully-containerized damn.dev setup detected.${RESET}"
-  echo ""
-  echo "This installer now uses the docker-local pattern:"
-  echo "  - damn.dev backend runs NATIVELY (better Ollama/host access)"
-  echo "  - Only OpenClaw stays in a Docker container"
-  echo ""
-  echo "Tear down the old containers first (your data in ~/.damn-dev + ~/.openclaw"
-  echo "is preserved — only the backend + frontend containers are removed):"
-  echo ""
-  echo "  docker compose -f \"$DAMN_DEV_DIR/docker-compose.local.yml\" down"
-  echo "  docker rm -f damn-dev-backend damn-dev-frontend 2>/dev/null"
-  echo "  rm \"$DAMN_DEV_DIR/docker-compose.local.yml\""
-  echo ""
-  echo "Then re-run:  curl -fsSL ${INSTALL_BASE_URL}/install-docker.sh | bash"
-  echo ""
-  exit 0
-}
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
 check_prerequisites() {
   command -v openssl &>/dev/null || die "openssl is required but not found. Install it and re-run."
   command -v curl    &>/dev/null || die "curl is required but not found. Install it and re-run."
-
-  if ! command -v node &>/dev/null; then
-    die "Node.js 18+ is required. Install it from https://nodejs.org (LTS version) then re-run this script."
-  fi
-  if ! node -e "process.exit(parseInt(process.version.slice(1)) < 18 ? 1 : 0)" 2>/dev/null; then
-    die "Node.js 18+ required. Current version: $(node --version)"
-  fi
-  info "Node.js $(node --version) detected."
 }
 
 # ── docker compose compat ──────────────────────────────────────────────────────
@@ -148,7 +102,7 @@ ensure_docker() {
 
 check_port() {
   if lsof -iTCP:"${PORT}" -sTCP:LISTEN &>/dev/null 2>&1; then
-    die "Port ${PORT} is already in use. Re-run with a different port: PORT=3002 curl ${INSTALL_BASE_URL}/install-docker.sh | bash"
+    die "Port ${PORT} is already in use. Re-run with a different port: PORT=5175 curl ${INSTALL_BASE_URL}/install-docker.sh | bash"
   fi
 }
 
@@ -203,7 +157,7 @@ write_openclaw_config() {
       "damndev": {
         "enabled": true,
         "config": {
-          "webhookUrl": "http://host.docker.internal:${PORT}/webhooks/openclaw",
+          "webhookUrl": "http://host.docker.internal:3001/webhooks/openclaw",
           "authToken": "${OPENCLAW_TOKEN}",
           "inboundSharedSecret": "${DAMNDEV_OUTBOUND_SECRET}",
           "hookForwardUrl": "http://localhost:18789/hooks/agent",
@@ -236,11 +190,45 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - OPENCLAW_GATEWAY_BIND=lan
-    env_file:
-      - ${OPENCLAW_DIR}/.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - damn-dev-net
     restart: unless-stopped
+
+  backend:
+    image: ghcr.io/${GHCR_OWNER}/damn-dev-backend:latest
+    container_name: damn-dev-backend
+    ports:
+      - "3001:3001"
+    volumes:
+      - ${DAMN_DEV_DIR}:/data
+    env_file:
+      - ${DAMN_DEV_DIR}/.env
+    environment:
+      REGISTRATION_MODE: \${REGISTRATION_MODE:-closed}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - openclaw
+    networks:
+      - damn-dev-net
+    restart: unless-stopped
+
+  frontend:
+    image: ghcr.io/${GHCR_OWNER}/damn-dev-frontend:latest
+    container_name: damn-dev-frontend
+    ports:
+      - "${PORT}:80"
+    depends_on:
+      - backend
+    networks:
+      - damn-dev-net
+    restart: unless-stopped
+
+networks:
+  damn-dev-net:
+    driver: bridge
 COMPOSE_EOF
 }
 
@@ -256,81 +244,45 @@ write_env() {
   fi
 
   cat > "$DAMN_DEV_DIR/.env" << ENV_EOF
-DATABASE_URL=file:${DAMN_DEV_DIR}/damn.db
-OPENCLAW_URL=http://localhost:18789
+DATABASE_URL=file:/data/damn.db
+OPENCLAW_URL=http://openclaw:18789
 OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
 BETTER_AUTH_SECRET=${better_auth_secret}
 DOMAIN=${DOMAIN}
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
-DAMNDEV_INSTALL_PATH=docker-local
+REGISTRATION_MODE=closed
 ENV_EOF
 }
 
-# ── Ensure ~/.openclaw/.env exists for the compose env_file mount ─────────────
+# ── Start ─────────────────────────────────────────────────────────────────────
 
-ensure_openclaw_env() {
-  [[ -f "$OPENCLAW_DIR/.env" ]] || touch "$OPENCLAW_DIR/.env"
-}
+start_containers() {
+  info "Pulling latest damn.dev images..."
+  $COMPOSE_CMD -f "$DAMN_DEV_DIR/docker-compose.local.yml" pull backend frontend
 
-# ── Install @damn-dev/cli ────────────────────────────────────────────────────
-
-install_damn_dev() {
-  if ! npm list -g @damn-dev/cli --depth=0 &>/dev/null; then
-    info "Installing @damn-dev/cli..."
-    npm install -g @damn-dev/cli
-  else
-    info "@damn-dev/cli already installed — checking for updates..."
-    npm install -g @damn-dev/cli
-  fi
-
-  # The damndev OpenClaw plugin ships inside the @damn-dev/cli package.
-  local plugin_src
-  plugin_src="$(npm root -g)/@damn-dev/cli/runtime/plugins/damndev"
-  if [[ ! -d "$plugin_src" ]]; then
-    die "damndev plugin not found at $plugin_src — the @damn-dev/cli install is broken."
-  fi
-  mkdir -p ~/openclaw-plugins
-  rm -rf ~/openclaw-plugins/damndev
-  cp -r "$plugin_src" ~/openclaw-plugins/damndev
-}
-
-# ── Start OpenClaw container ─────────────────────────────────────────────────
-
-start_openclaw() {
-  info "Starting OpenClaw container..."
+  info "Starting containers..."
   $COMPOSE_CMD -f "$DAMN_DEV_DIR/docker-compose.local.yml" up -d
 
-  info "Waiting for OpenClaw..."
-  for i in $(seq 1 15); do
-    sleep 2
-    if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
-      success "OpenClaw is running."
+  info "Waiting for backend..."
+  for i in $(seq 1 20); do
+    sleep 3
+    if curl -sf "http://localhost:3001/health" > /dev/null 2>&1; then
+      break
+    fi
+    printf "."
+  done
+  echo ""
+
+  info "Waiting for frontend..."
+  for i in $(seq 1 20); do
+    sleep 3
+    if curl -sf "http://localhost:${PORT}" > /dev/null 2>&1; then
       return 0
     fi
     printf "."
   done
   echo ""
-  die "OpenClaw did not start. Check logs: $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml logs -f"
-}
-
-# ── Start damn-dev backend ───────────────────────────────────────────────────
-
-start_damn_dev() {
-  # @damn-dev/cli manages its own pidfile at ~/.damn-dev/damn-dev.pid.
-  damn-dev stop >/dev/null 2>&1 || true
-  damn-dev start --port "$PORT"
-
-  info "Waiting for damn.dev to start..."
-  for i in $(seq 1 15); do
-    sleep 2
-    if curl -sf "http://localhost:${PORT}/health" > /dev/null 2>&1; then
-      success "damn.dev is ready."
-      return 0
-    fi
-    printf "."
-  done
-  echo ""
-  die "damn.dev did not start in time. Check logs: $DAMN_DEV_DIR/damn-dev.log"
+  die "damn.dev did not become ready. Check logs: $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml logs -f"
 }
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -342,15 +294,13 @@ print_summary() {
   echo "  http://localhost:${PORT}"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
-  echo "  Backend:  damn-dev (native, port ${PORT})"
-  echo "  OpenClaw: Docker container (openclaw:hardened)"
-  echo ""
-  echo "  To update:  curl -fsSL install.damn.dev/docker | bash"
-  echo "  To stop:    damn-dev stop && $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml down"
+  echo "  To update:  curl ${INSTALL_BASE_URL}/install-docker.sh | bash"
+  echo "  To stop:    $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml down"
   echo "  Logs:       $COMPOSE_CMD -f $DAMN_DEV_DIR/docker-compose.local.yml logs -f"
   echo ""
   echo "  Note: /var/run/docker.sock is mounted into the OpenClaw container to enable"
   echo "  agent sandboxing. This grants the container access to the host Docker daemon."
+  echo "  See docs/INSTALL.md for the security implications."
   echo ""
   command -v open     &>/dev/null && open     "http://localhost:${PORT}" 2>/dev/null || true
   command -v xdg-open &>/dev/null && xdg-open "http://localhost:${PORT}" 2>/dev/null || true
@@ -359,9 +309,6 @@ print_summary() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 check_prerequisites
-ensure_docker
-detect_old_fullcontainer_install
-check_port
 
 if [[ -f "$DAMN_DEV_DIR/.env" ]]; then
   OPENCLAW_TOKEN=$(grep '^OPENCLAW_TOKEN=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || true)
@@ -380,12 +327,11 @@ fi
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
 
+ensure_docker
+check_port
 pull_openclaw_hardened
 write_openclaw_config
 write_compose
 write_env
-ensure_openclaw_env
-install_damn_dev
-start_openclaw
-start_damn_dev
+start_containers
 print_summary
