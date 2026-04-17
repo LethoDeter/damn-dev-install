@@ -167,7 +167,6 @@ OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
 BETTER_AUTH_SECRET=${better_auth_secret}
 DOMAIN=${DOMAIN}
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
-DAMN_DEV_VERSION_URL=https://raw.githubusercontent.com/LethoDeter/damn-dev-install/main/version.json
 ENV_EOF
 
   if [[ -f "$DAMN_DEV_DIR/damn-dev.pid" ]] && kill -0 "$(cat "$DAMN_DEV_DIR/damn-dev.pid")" 2>/dev/null; then
