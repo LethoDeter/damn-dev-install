@@ -146,10 +146,53 @@ ensure_docker() {
 
 # ── Port check ────────────────────────────────────────────────────────────────
 
+# Stop any damn-dev backend we previously started (update flow: user re-runs
+# the installer while the backend is still holding :PORT). The CLI's own
+# stop command is idempotent and safe on fresh installs where no binary
+# exists yet.
+pre_stop_existing_damndev() {
+  command -v damn-dev &>/dev/null && damn-dev stop >/dev/null 2>&1 || true
+}
+
 check_port() {
   if lsof -iTCP:"${PORT}" -sTCP:LISTEN &>/dev/null 2>&1; then
-    die "Port ${PORT} is already in use. Re-run with a different port: PORT=3002 curl ${INSTALL_BASE_URL}/install-docker.sh | bash"
+    die "Port ${PORT} is already in use by another process. Re-run with a different port: PORT=3002 curl ${INSTALL_BASE_URL}/install-docker.sh | bash"
   fi
+}
+
+# Catch the npm-path → docker-local migration: user previously ran
+# install.damn.dev/npm (native OpenClaw on :18789). Our Docker OpenClaw
+# would collide on :18789. Detect before `docker compose up` fails opaquely.
+detect_native_openclaw_conflict() {
+  lsof -iTCP:18789 -sTCP:LISTEN &>/dev/null 2>&1 || return 0
+
+  # Is the listener a Docker container (com.docker.vpnkit proxy) or a native process?
+  local pid
+  pid=$(lsof -iTCP:18789 -sTCP:LISTEN -t 2>/dev/null | head -1)
+  if [[ -z "$pid" ]]; then return 0; fi
+
+  local comm
+  comm=$(ps -p "$pid" -o comm= 2>/dev/null)
+  # Docker's port publisher appears as 'com.docker.backend' / 'vpnkit' / 'Docker Desktop'.
+  # Anything else on :18789 is a native OpenClaw process.
+  if echo "$comm" | grep -qiE 'docker|vpnkit'; then
+    return 0
+  fi
+
+  echo -e "${BOLD}Native OpenClaw detected on :18789.${RESET}"
+  echo ""
+  echo "This installer uses Docker OpenClaw, which also needs :18789."
+  echo "Stop the native OpenClaw first:"
+  echo ""
+  if [[ -f "$DAMN_DEV_DIR/openclaw.pid" ]]; then
+    echo "  pkill -F \"$DAMN_DEV_DIR/openclaw.pid\""
+  else
+    echo "  pkill -f openclaw"
+  fi
+  echo ""
+  echo "Then re-run:  curl -fsSL ${INSTALL_BASE_URL}/install-docker.sh | bash"
+  echo ""
+  exit 0
 }
 
 # ── OpenClaw hardened image ───────────────────────────────────────────────────
@@ -361,6 +404,8 @@ print_summary() {
 check_prerequisites
 ensure_docker
 detect_old_fullcontainer_install
+detect_native_openclaw_conflict
+pre_stop_existing_damndev
 check_port
 
 if [[ -f "$DAMN_DEV_DIR/.env" ]]; then
