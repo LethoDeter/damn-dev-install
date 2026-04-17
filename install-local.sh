@@ -12,7 +12,7 @@ die()     { echo -e "${RED}[damn.dev] ERROR:${RESET} $*" >&2; exit 1; }
 
 DAMN_DEV_DIR="$HOME/.damn-dev"
 OPENCLAW_DIR="$HOME/.openclaw"
-PORT="${PORT:-5174}"
+PORT="${PORT:-3001}"
 DOMAIN=""
 INSTALL_BASE_URL="https://raw.githubusercontent.com/LethoDeter/damn-dev-install/main"
 
@@ -31,6 +31,8 @@ echo -e "${BOLD}damn.dev — npm installer${RESET}"
 echo "──────────────────────────────────"
 echo ""
 
+# ── Node.js prerequisite ──────────────────────────────────────────────────────
+
 check_node() {
   if ! command -v node &>/dev/null; then
     die "Node.js is required. Install it from https://nodejs.org (LTS version) then re-run this script."
@@ -41,41 +43,50 @@ check_node() {
   info "Node.js $(node --version) detected."
 }
 
-install_openclaw() {
-  if [[ -f "$DAMN_DEV_DIR/openclaw.pid" ]] && kill -0 "$(cat "$DAMN_DEV_DIR/openclaw.pid")" 2>/dev/null; then
-    if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
-      info "OpenClaw already running — skipping."
-      OPENCLAW_TOKEN=$(grep -m1 '"token"' "$OPENCLAW_DIR/openclaw.json" 2>/dev/null | sed 's/.*"token": *"\([^"]*\)".*/\1/' || openssl rand -hex 32)
-      return 0
-    fi
-  fi
+# ── npm package installation (CLI first so plugin is available for OpenClaw) ──
 
-  if [[ -f "$DAMN_DEV_DIR/.env" ]]; then
-    OPENCLAW_TOKEN=$(grep '^OPENCLAW_TOKEN=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
-  fi
-  if [[ -z "${OPENCLAW_TOKEN:-}" ]]; then
-    OPENCLAW_TOKEN=$(openssl rand -hex 32)
-  fi
-
-  if [[ -f "$DAMN_DEV_DIR/.env" ]]; then
-    DAMNDEV_OUTBOUND_SECRET=$(grep '^DAMNDEV_OUTBOUND_SECRET=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
-  fi
-  if [[ -z "${DAMNDEV_OUTBOUND_SECRET:-}" ]]; then
-    DAMNDEV_OUTBOUND_SECRET=$(openssl rand -hex 32)
+install_npm_packages() {
+  if ! npm list -g @damn-dev/cli --depth=0 &>/dev/null; then
+    info "Installing @damn-dev/cli..."
+    npm install -g @damn-dev/cli
+  else
+    info "@damn-dev/cli already installed — checking for updates..."
+    npm install -g @damn-dev/cli
   fi
 
   if ! npm list -g openclaw --depth=0 &>/dev/null; then
     info "Installing OpenClaw..."
     npm install -g openclaw
   else
-    info "OpenClaw already installed globally."
+    info "OpenClaw already installed."
   fi
+}
 
-  PLUGIN_SRC="$(npm root -g)/damn-dev/openclaw-plugins/damndev"
-  if [[ -d "$PLUGIN_SRC" ]]; then
-    mkdir -p ~/openclaw-plugins
-    cp -r "$PLUGIN_SRC" ~/openclaw-plugins/damndev
+# ── Secret hydration (reuse across re-installs) ───────────────────────────────
+
+hydrate_secrets() {
+  if [[ -f "$DAMN_DEV_DIR/.env" ]]; then
+    OPENCLAW_TOKEN=$(grep '^OPENCLAW_TOKEN=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
+    DAMNDEV_OUTBOUND_SECRET=$(grep '^DAMNDEV_OUTBOUND_SECRET=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
+    BETTER_AUTH_SECRET=$(grep '^BETTER_AUTH_SECRET=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
   fi
+  [[ -z "${OPENCLAW_TOKEN:-}" ]]          && OPENCLAW_TOKEN=$(openssl rand -hex 32)
+  [[ -z "${DAMNDEV_OUTBOUND_SECRET:-}" ]] && DAMNDEV_OUTBOUND_SECRET=$(openssl rand -hex 32)
+  [[ -z "${BETTER_AUTH_SECRET:-}" ]]      && BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+}
+
+# ── OpenClaw configure + start ────────────────────────────────────────────────
+
+configure_openclaw() {
+  # Copy bundled damndev plugin from the @damn-dev/cli package (installed above).
+  local plugin_src
+  plugin_src="$(npm root -g)/@damn-dev/cli/runtime/plugins/damndev"
+  if [[ ! -d "$plugin_src" ]]; then
+    die "damndev plugin not found at $plugin_src — the @damn-dev/cli install is broken."
+  fi
+  mkdir -p ~/openclaw-plugins
+  rm -rf ~/openclaw-plugins/damndev
+  cp -r "$plugin_src" ~/openclaw-plugins/damndev
 
   cat > "$OPENCLAW_DIR/openclaw.json" << OPENCLAW_EOF
 {
@@ -95,9 +106,7 @@ install_openclaw() {
   ],
   "agents": {
     "defaults": {
-      "sandbox": {
-        "mode": "non-main"
-      }
+      "sandbox": { "mode": "non-main" }
     },
     "list": []
   },
@@ -111,7 +120,7 @@ install_openclaw() {
       "damndev": {
         "enabled": true,
         "config": {
-          "webhookUrl": "http://localhost:3001/webhooks/openclaw",
+          "webhookUrl": "http://localhost:${PORT}/webhooks/openclaw",
           "authToken": "${OPENCLAW_TOKEN}",
           "inboundSharedSecret": "${DAMNDEV_OUTBOUND_SECRET}",
           "hookForwardUrl": "http://localhost:18789/hooks/agent",
@@ -126,6 +135,16 @@ install_openclaw() {
   }
 }
 OPENCLAW_EOF
+}
+
+start_openclaw() {
+  if [[ -f "$DAMN_DEV_DIR/openclaw.pid" ]] && kill -0 "$(cat "$DAMN_DEV_DIR/openclaw.pid")" 2>/dev/null; then
+    if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
+      info "OpenClaw already running — reloading config via restart..."
+      kill "$(cat "$DAMN_DEV_DIR/openclaw.pid")" 2>/dev/null || true
+      sleep 2
+    fi
+  fi
 
   info "Starting OpenClaw..."
   nohup openclaw start > "$DAMN_DEV_DIR/openclaw.log" 2>&1 &
@@ -143,52 +162,38 @@ OPENCLAW_EOF
   die "OpenClaw did not start. Check $DAMN_DEV_DIR/openclaw.log"
 }
 
-install_damn_dev() {
-  if ! npm list -g damn-dev --depth=0 &>/dev/null; then
-    info "Installing damn.dev..."
-    npm install -g damn-dev
-  else
-    info "damn.dev already installed — checking for updates..."
-    npm install -g damn-dev
-  fi
+# ── damn.dev configure + start ────────────────────────────────────────────────
 
-  local better_auth_secret
-  if [[ -f "$DAMN_DEV_DIR/.env" ]]; then
-    better_auth_secret=$(grep '^BETTER_AUTH_SECRET=' "$DAMN_DEV_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
-  fi
-  if [[ -z "${better_auth_secret:-}" ]]; then
-    better_auth_secret=$(openssl rand -hex 32)
-  fi
-
+configure_damn_dev() {
   cat > "$DAMN_DEV_DIR/.env" << ENV_EOF
 DATABASE_URL=file:${DAMN_DEV_DIR}/damn.db
 OPENCLAW_URL=http://localhost:18789
 OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
-BETTER_AUTH_SECRET=${better_auth_secret}
+BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
 DOMAIN=${DOMAIN}
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
 ENV_EOF
+}
 
-  if [[ -f "$DAMN_DEV_DIR/damn-dev.pid" ]] && kill -0 "$(cat "$DAMN_DEV_DIR/damn-dev.pid")" 2>/dev/null; then
-    info "damn.dev already running — restarting..."
-    kill "$(cat "$DAMN_DEV_DIR/damn-dev.pid")" 2>/dev/null || true
-    sleep 2
-  fi
-
-  damn-dev start --port "$PORT" &
-  echo $! > "$DAMN_DEV_DIR/damn-dev.pid"
+start_damn_dev() {
+  # damn-dev CLI manages its own pidfile (writes to ~/.damn-dev/damn-dev.pid).
+  # Re-running start when already up is refused by the CLI, so stop first.
+  damn-dev stop >/dev/null 2>&1 || true
+  damn-dev start --port "$PORT"
 
   info "Waiting for damn.dev to start..."
   for i in $(seq 1 15); do
     sleep 2
-    if curl -sf "http://localhost:${PORT}/api/health" > /dev/null 2>&1; then
+    if curl -sf "http://localhost:${PORT}/health" > /dev/null 2>&1; then
       return 0
     fi
     printf "."
   done
   echo ""
-  die "damn.dev did not start in time. Check logs."
+  die "damn.dev did not start in time. Check $DAMN_DEV_DIR/damn-dev.log"
 }
+
+# ── Summary ───────────────────────────────────────────────────────────────────
 
 print_summary() {
   echo ""
@@ -197,14 +202,20 @@ print_summary() {
   echo "  http://localhost:${PORT}"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
-  echo "  To update:  curl ${INSTALL_BASE_URL}/install-local.sh | bash"
-  echo "  To stop:    pkill -F $DAMN_DEV_DIR/damn-dev.pid && pkill -F $DAMN_DEV_DIR/openclaw.pid"
+  echo "  To update:  curl -fsSL install.damn.dev/npm | bash"
+  echo "  To stop:    damn-dev stop && pkill -F $DAMN_DEV_DIR/openclaw.pid"
   echo ""
-  command -v open    &>/dev/null && open    "http://localhost:${PORT}" || true
-  command -v xdg-open &>/dev/null && xdg-open "http://localhost:${PORT}" 2>/dev/null || true
+  command -v open     &>/dev/null && open     "http://localhost:${PORT}" >/dev/null 2>&1 || true
+  command -v xdg-open &>/dev/null && xdg-open "http://localhost:${PORT}" 2>/dev/null     || true
 }
 
+# ── Orchestrate ───────────────────────────────────────────────────────────────
+
 check_node
-install_openclaw
-install_damn_dev
+install_npm_packages
+hydrate_secrets
+configure_openclaw
+start_openclaw
+configure_damn_dev
+start_damn_dev
 print_summary
