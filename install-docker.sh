@@ -75,14 +75,73 @@ detect_old_fullcontainer_install() {
 check_prerequisites() {
   command -v openssl &>/dev/null || die "openssl is required but not found. Install it and re-run."
   command -v curl    &>/dev/null || die "curl is required but not found. Install it and re-run."
+  ensure_node_22
+}
 
-  if ! command -v node &>/dev/null; then
-    die "Node.js 18+ is required. Install it from https://nodejs.org (LTS version) then re-run this script."
+# Require Node 22+ because better-auth (and other modern deps) are ESM-only;
+# CommonJS require() of ESM is only supported unflagged on Node 22+.
+#
+# Tiered upgrade flow:
+#   1. Node >= 22 already → continue
+#   2. No Node OR Node < 22, Homebrew present → offer brew install node@22 (Y/n)
+#   3. No brew → point at damn.dev DMG desktop app (bundles own Node, zero setup)
+#      + fallback: nodejs.org .pkg installer
+ensure_node_22() {
+  if command -v node &>/dev/null && \
+     node -e "process.exit(parseInt(process.version.slice(1)) < 22 ? 1 : 0)" 2>/dev/null; then
+    info "Node.js $(node --version) detected."
+    return 0
   fi
-  if ! node -e "process.exit(parseInt(process.version.slice(1)) < 18 ? 1 : 0)" 2>/dev/null; then
-    die "Node.js 18+ required. Current version: $(node --version)"
+
+  local current
+  current=$(command -v node &>/dev/null && node --version 2>/dev/null || echo "(not installed)")
+  echo ""
+  info "Node.js 22+ is required — damn.dev depends on ESM modules only supported on Node 22+."
+  info "Currently: $current"
+  echo ""
+
+  # Homebrew path — auto-upgrade with consent
+  if command -v brew &>/dev/null; then
+    local reply=""
+    if [[ -t 0 ]]; then
+      read -r -p "Install and activate Node 22 via Homebrew now? [Y/n] " reply </dev/tty
+    elif [[ -r /dev/tty ]]; then
+      read -r -p "Install and activate Node 22 via Homebrew now? [Y/n] " reply </dev/tty
+    else
+      reply="Y"  # non-interactive (CI) — proceed
+    fi
+    reply="${reply:-Y}"
+    if [[ "$reply" =~ ^[Yy]$ ]]; then
+      info "Installing node@22 via Homebrew..."
+      brew install node@22 || die "brew install node@22 failed. Upgrade manually then re-run."
+      info "Activating node@22 as the default node..."
+      brew link --overwrite --force node@22 || die "brew link failed. Run manually: brew link --overwrite --force node@22"
+      hash -r
+      if node -e "process.exit(parseInt(process.version.slice(1)) < 22 ? 1 : 0)" 2>/dev/null; then
+        success "Node $(node --version) is now active."
+        return 0
+      fi
+      die "Node was installed but $(node --version) is still the default. Open a new terminal and re-run this script."
+    fi
+    die "Upgrade declined. Install Node 22+ and re-run. Tip: brew install node@22 && brew link --overwrite --force node@22"
   fi
-  info "Node.js $(node --version) detected."
+
+  # No Homebrew — offer two paths
+  echo -e "${BOLD}Homebrew not found.${RESET} Two options:"
+  echo ""
+  echo -e "${BOLD}1. Download the damn.dev desktop app${RESET} (recommended if you don't want to deal with Node):"
+  echo "   It bundles its own Node 22 — zero setup. Drag, drop, run."
+  echo "   → https://damn.dev  (download section)"
+  echo "   → https://github.com/LethoDeter/damn-dev-install/releases/latest  (direct binaries)"
+  echo ""
+  echo -e "${BOLD}2. Install Node 22 LTS yourself${RESET} (then use the CLI install):"
+  echo "   → https://nodejs.org/en/download  (select the macOS .pkg installer)"
+  echo "   After install, open a new terminal and re-run:"
+  echo "     curl -fsSL ${INSTALL_BASE_URL}/install-docker.sh | bash"
+  echo ""
+  command -v open     &>/dev/null && open     "https://damn.dev" 2>/dev/null || true
+  command -v xdg-open &>/dev/null && xdg-open "https://damn.dev" 2>/dev/null || true
+  die "Pick one of the above to continue."
 }
 
 # ── docker compose compat ──────────────────────────────────────────────────────
