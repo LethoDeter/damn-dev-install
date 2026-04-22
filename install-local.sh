@@ -69,12 +69,19 @@ ensure_node_22() {
       brew install node@22 || die "brew install node@22 failed. Upgrade manually then re-run."
       info "Activating node@22 as the default node..."
       brew link --overwrite --force node@22 || die "brew link failed. Run manually: brew link --overwrite --force node@22"
+      # Explicit PATH prepend: `hash -r` only refreshes the shell's command hash
+      # table, not $PATH resolution. When this script runs via `curl ... | bash`,
+      # the outer bash has a stale PATH that doesn't include Homebrew's node@22
+      # keg. Without this, later `npm install` calls either use a different Node
+      # or silently exit, leaving the user at a prompt with Node 22 installed
+      # but damn.dev NOT installed — requiring manual re-run. Fix added 0.9.16.
+      export PATH="$(brew --prefix node@22)/bin:$PATH"
       hash -r
       if node -e "process.exit(parseInt(process.version.slice(1)) < 22 ? 1 : 0)" 2>/dev/null; then
-        success "Node $(node --version) is now active."
+        success "Node $(node --version) is now active — continuing with damn.dev install."
         return 0
       fi
-      die "Node was installed but $(node --version) is still the default. Open a new terminal and re-run this script."
+      die "Node was installed but $(node --version) is still the default. Open a new terminal and re-run: curl -fsSL ${INSTALL_BASE_URL:-https://install.damn.dev}/npm | bash"
     fi
     die "Upgrade declined. Install Node 22+ and re-run. Tip: brew install node@22 && brew link --overwrite --force node@22"
   fi
