@@ -335,7 +335,11 @@ write_compose() {
   cat > "$DAMN_DEV_DIR/docker-compose.local.yml" << COMPOSE_EOF
 services:
   openclaw:
-    image: openclaw:hardened
+    # Reference the GHCR coordinate directly so \`docker compose pull\` works
+    # for in-product damn.dev updates. The local \`openclaw:hardened\` tag
+    # (created by pull_openclaw_hardened above for backward compat) stays
+    # available for direct \`docker run\` use but is no longer referenced here.
+    image: ghcr.io/${GHCR_OWNER}/openclaw-hardened:latest
     container_name: damn-dev-openclaw
     user: "${HOST_UID}:${HOST_GID}"
     ports:
