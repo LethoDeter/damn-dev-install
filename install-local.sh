@@ -166,7 +166,7 @@ configure_openclaw() {
   ],
   "agents": {
     "defaults": {
-      "sandbox": { "mode": "non-main" }
+      "sandbox": { "mode": "off" }
     },
     "list": []
   },

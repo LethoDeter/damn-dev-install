@@ -297,7 +297,7 @@ write_openclaw_config() {
   "agents": {
     "defaults": {
       "sandbox": {
-        "mode": "non-main"
+        "mode": "off"
       }
     },
     "list": []
