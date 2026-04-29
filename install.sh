@@ -45,15 +45,15 @@ echo ""
 
 # ── Prompts ─────────────────────────────────────────────────────────────────
 
-read -rp "$(echo -e "${BOLD}Your domain${RESET} (e.g. app.yourdomain.com): ")" DOMAIN
+read -rp "$(echo -e "${BOLD}Your domain${RESET} (e.g. app.yourdomain.com): ")" DOMAIN </dev/tty
 [[ -z "$DOMAIN" ]] && die "Domain cannot be empty."
 
 echo ""
 info "Google OAuth (optional — skip to use email/password auth only)"
-read -rp "  GOOGLE_CLIENT_ID   [leave blank to skip]: " GOOGLE_CLIENT_ID
+read -rp "  GOOGLE_CLIENT_ID   [leave blank to skip]: " GOOGLE_CLIENT_ID </dev/tty
 GOOGLE_CLIENT_SECRET=""
 if [[ -n "$GOOGLE_CLIENT_ID" ]]; then
-  read -rp "  GOOGLE_CLIENT_SECRET: " GOOGLE_CLIENT_SECRET
+  read -rp "  GOOGLE_CLIENT_SECRET: " GOOGLE_CLIENT_SECRET </dev/tty
   [[ -z "$GOOGLE_CLIENT_SECRET" ]] && die "GOOGLE_CLIENT_SECRET cannot be empty when GOOGLE_CLIENT_ID is set."
 fi
 
