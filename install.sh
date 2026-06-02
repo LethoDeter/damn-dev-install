@@ -276,7 +276,12 @@ services:
       - frontend
 
   watchtower:
-    image: containrrr/watchtower
+    # Digest-pinned: this container has full Docker socket access. Same security
+    # tier as docker-socket-proxy below — never use a mutable tag here. Bumping
+    # requires fetching the new digest from Docker Hub and updating all 3 install
+    # paths (this file + damn-dev/scripts/install.sh + damn-dev-cloud/provisioning/
+    # src/lib/provision.ts) in lockstep. See CLAUDE.md "Watchtower digest pin".
+    image: containrrr/watchtower@sha256:6dd50763bbd632a83cb154d5451700530d1e44200b268a4e9488fefdfcf2b038
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
