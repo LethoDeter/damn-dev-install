@@ -466,8 +466,25 @@ ensure_pnpm() {
 install_damn_dev() {
   ensure_pnpm
   # `pnpm add -g` is idempotent — installs on first run, updates thereafter.
+  # pnpm 10+ blocks dependency build scripts by default: interactively it
+  # prompts, non-interactively (curl | bash — no TTY) it SILENTLY SKIPS them.
+  # Skipped builds = no better-sqlite3 native binary + no `prisma generate`
+  # postinstall = `damn-dev start` won't boot. So we explicitly allow the
+  # build-script deps we ship. Keep this list in lockstep with install-local.sh,
+  # the backend installCliLatest(), and .github/workflows/cli-install-guard.yml
+  # (CI fails if a shipped build-script dep is missing here).
   info "Installing @damn-dev/cli (via pnpm)..."
-  pnpm add -g @damn-dev/cli
+  pnpm add -g @damn-dev/cli \
+    --allow-build=@damn-dev/cli \
+    --allow-build=better-sqlite3 \
+    --allow-build=impit \
+    --allow-build=node-pty \
+    --allow-build=sharp \
+    --allow-build=@whiskeysockets/baileys \
+    --allow-build=protobufjs \
+    --allow-build=prisma \
+    --allow-build=@prisma/client \
+    --allow-build=@prisma/engines
 
   command -v damn-dev &>/dev/null || die "@damn-dev/cli installed but 'damn-dev' is not on PATH. Open a new terminal and re-run, or add pnpm's global bin to PATH."
 
