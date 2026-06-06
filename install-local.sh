@@ -103,17 +103,85 @@ ensure_node_22() {
   die "Pick one of the above to continue."
 }
 
-# ── npm package installation (CLI first so plugin is available for OpenClaw) ──
+# ── pnpm (required to install @damn-dev/cli) ─────────────────────────────────
+#
+# @damn-dev/cli depends on camoufox-js (browser-builtin), which pulls in the
+# native `impit` library. impit ships a `preinstall: npx only-allow pnpm` guard
+# that HARD-FAILS any npm-based install (the user sees `npm error code 127 …
+# only-allow … pnpm` and the install aborts). The guard passes under pnpm, so we
+# install the CLI with pnpm. corepack (bundled with Node 22) provides pnpm with
+# no separate global install; we fall back to `npm install -g pnpm` if corepack
+# is unavailable (pnpm itself has no only-allow guard, so that path is safe).
+persist_pnpm_path() {
+  local marker="# damn.dev installer — pnpm global bin on PATH"
+  local rc
+  case "${SHELL:-}" in
+    *zsh)  rc="$HOME/.zshrc" ;;
+    *bash) rc="$HOME/.bashrc" ;;
+    *)     rc="$HOME/.profile" ;;
+  esac
+  if [[ -f "$rc" ]] && grep -qF "$marker" "$rc" 2>/dev/null; then
+    return 0
+  fi
+  {
+    printf '\n%s\n' "$marker"
+    printf 'export PNPM_HOME="%s"\n' "$PNPM_HOME"
+    printf 'case ":$PATH:" in *":$PNPM_HOME:"*) ;; *) export PATH="$PNPM_HOME:$PATH" ;; esac\n'
+  } >> "$rc"
+  info "Added pnpm to PATH in ${rc/#$HOME/~} (takes effect in new terminals)."
+}
+
+ensure_pnpm() {
+  local had_pnpm=""
+  if command -v pnpm &>/dev/null; then had_pnpm="yes"; fi
+
+  if [[ -z "$had_pnpm" ]]; then
+    info "Activating pnpm via corepack..."
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+    if command -v corepack &>/dev/null; then
+      corepack enable pnpm >/dev/null 2>&1 || true
+      corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
+      hash -r
+    fi
+    if ! command -v pnpm &>/dev/null; then
+      info "corepack unavailable — installing pnpm via npm..."
+      npm install -g pnpm >/dev/null 2>&1 || die "Could not install pnpm. Run: npm install -g pnpm — then re-run this installer."
+      hash -r
+    fi
+  fi
+  command -v pnpm &>/dev/null || die "pnpm could not be activated. Install it manually (npm install -g pnpm) and re-run."
+
+  # pnpm links global binaries into its global bin dir, which is NOT on PATH by
+  # default (npm's global prefix is — that's why the old npm path got `damn-dev`
+  # for free). Make the dir deterministic, add it to PATH for this run, and
+  # persist it so `damn-dev` resolves in future shells.
+  if [[ -n "$had_pnpm" ]]; then
+    local gbin; gbin="$(pnpm bin -g 2>/dev/null || true)"
+    if [[ -n "$gbin" ]]; then
+      case ":$PATH:" in *":$gbin:"*) ;; *) export PATH="$gbin:$PATH" ;; esac
+    fi
+  else
+    export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+    mkdir -p "$PNPM_HOME"
+    case ":$PATH:" in *":$PNPM_HOME:"*) ;; *) export PATH="$PNPM_HOME:$PATH" ;; esac
+    pnpm config set global-bin-dir "$PNPM_HOME" >/dev/null 2>&1 || true
+    persist_pnpm_path
+  fi
+  hash -r
+  success "pnpm $(pnpm --version) ready."
+}
+
+# ── Package installation (CLI first so plugin is available for OpenClaw) ──────
 
 install_npm_packages() {
-  if ! npm list -g @damn-dev/cli --depth=0 &>/dev/null; then
-    info "Installing @damn-dev/cli..."
-    npm install -g @damn-dev/cli
-  else
-    info "@damn-dev/cli already installed — checking for updates..."
-    npm install -g @damn-dev/cli
-  fi
+  ensure_pnpm
+  # `pnpm add -g` is idempotent — installs on first run, updates thereafter.
+  info "Installing @damn-dev/cli (via pnpm)..."
+  pnpm add -g @damn-dev/cli
+  command -v damn-dev &>/dev/null || die "@damn-dev/cli installed but 'damn-dev' is not on PATH. Open a new terminal and re-run, or add pnpm's global bin to PATH."
 
+  # OpenClaw runs natively on the npm path. It has no only-allow guard and
+  # doesn't pull impit, so a plain npm global install is fine here.
   if ! npm list -g openclaw --depth=0 &>/dev/null; then
     info "Installing OpenClaw..."
     npm install -g openclaw
@@ -138,9 +206,10 @@ hydrate_secrets() {
 # ── OpenClaw configure + start ────────────────────────────────────────────────
 
 configure_openclaw() {
-  # Copy bundled damndev plugin from the @damn-dev/cli package (installed above).
+  # Copy bundled damndev plugin from the @damn-dev/cli package (installed above
+  # via pnpm, so resolve through pnpm's global node_modules root).
   local plugin_src
-  plugin_src="$(npm root -g)/@damn-dev/cli/runtime/plugins/damndev"
+  plugin_src="$(pnpm root -g)/@damn-dev/cli/runtime/plugins/damndev"
   if [[ ! -d "$plugin_src" ]]; then
     die "damndev plugin not found at $plugin_src — the @damn-dev/cli install is broken."
   fi
