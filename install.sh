@@ -64,6 +64,7 @@ echo ""
 BETTER_AUTH_SECRET=$(openssl rand -hex 32)
 DAMNDEV_OUTBOUND_SECRET=$(openssl rand -hex 32)
 OPENCLAW_TOKEN=$(openssl rand -hex 32)
+SHELL_EXECUTOR_SECRET=$(openssl rand -hex 32)
 OPENCLAW_URL="http://openclaw:18789"
 
 # ── Write .env ───────────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ BETTER_AUTH_URL=https://${DOMAIN}
 BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
 OPENCLAW_URL=${OPENCLAW_URL}
 OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
+SHELL_EXECUTOR_SECRET=${SHELL_EXECUTOR_SECRET}
 OPENCLAW_CONTAINER_NAME=openclaw
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
 GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -214,6 +216,26 @@ services:
     volumes:
       - damn_db:/data
 
+  shell-executor:
+    # Contained ops shell executor (Containment Floor H3). Agent shell runs HERE, not
+    # in the backend — so secrets are not mounted (ENOENT) and egress has no route
+    # (exec-net is internal:true). The Docker daemon creates it (no --privileged, no
+    # docker.sock). See CONTAINMENT_EXECUTOR_PLAN.md.
+    image: ghcr.io/${GHCR_OWNER}/damn-dev-shell-executor:latest
+    restart: unless-stopped
+    environment:
+      SHELL_EXECUTOR_SECRET: ${SHELL_EXECUTOR_SECRET}
+      SHELL_EXECUTOR_PORT: "9000"
+    networks:
+      - exec-net
+    volumes:
+      # ONLY agent work dirs. The parent /root/.openclaw (openclaw.json with decrypted
+      # provider keys, .env) is NOT bound, so secrets are absent. NEVER mount
+      # /root/.damn-dev, the full /root/.openclaw, or damn_db here.
+      - /root/.openclaw/agents:/home/node/.openclaw/agents
+    tmpfs:
+      - /tmp
+
   backend:
     image: ghcr.io/${GHCR_OWNER}/damn-dev-backend:latest
     restart: unless-stopped
@@ -233,6 +255,8 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       REGISTRATION_MODE: ${REGISTRATION_MODE:-closed}
       DAMNDEV_CONTAINERIZED: "true"
+      SHELL_EXECUTOR_URL: http://shell-executor:9000
+      SHELL_EXECUTOR_SECRET: ${SHELL_EXECUTOR_SECRET}
       DAMNDEV_INSTALL_PATH: docker-vps
       DAMN_DEV_VERSION_URL: https://damn.dev/version.json
       OPENCLAW_CONTAINER_NAME: ${OPENCLAW_CONTAINER_NAME:-openclaw}
@@ -240,6 +264,7 @@ services:
     networks:
       - default
       - proxy-net
+      - exec-net
     volumes:
       - damn_db:/data
       - /root/.openclaw:/home/node/.openclaw
@@ -319,6 +344,8 @@ services:
 networks:
   proxy-net:
     internal: true
+  exec-net:
+    internal: true
 
 volumes:
   damn_db:
@@ -355,6 +382,12 @@ success "Deployment files written to $INSTALL_DIR"
 # ── Build & start ─────────────────────────────────────────────────────────────
 
 info "Pulling and starting containers (this takes ~2 minutes on first run)..."
+# Ensure the agent work-dir tree exists + is owned by uid 1000 BEFORE compose up, so
+# the backend (full /root/.openclaw mount) and the shell-executor (agents-only mount)
+# can both read/write it. Without this Docker auto-creates the bind source root-owned
+# and the backend (uid 1000) can't create agent dirs. See CONTAINMENT_EXECUTOR_PLAN.md.
+mkdir -p /root/.openclaw/agents && chown -R 1000:1000 /root/.openclaw
+
 docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" up -d
 
 echo ""
