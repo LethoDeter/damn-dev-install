@@ -65,6 +65,7 @@ BETTER_AUTH_SECRET=$(openssl rand -hex 32)
 DAMNDEV_OUTBOUND_SECRET=$(openssl rand -hex 32)
 OPENCLAW_TOKEN=$(openssl rand -hex 32)
 SHELL_EXECUTOR_SECRET=$(openssl rand -hex 32)
+EGRESS_PROXY_SECRET=$(openssl rand -hex 32)
 OPENCLAW_URL="http://openclaw:18789"
 
 # ── Write .env ───────────────────────────────────────────────────────────────
@@ -79,6 +80,7 @@ BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
 OPENCLAW_URL=${OPENCLAW_URL}
 OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
 SHELL_EXECUTOR_SECRET=${SHELL_EXECUTOR_SECRET}
+EGRESS_PROXY_SECRET=${EGRESS_PROXY_SECRET}
 OPENCLAW_CONTAINER_NAME=openclaw
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
 GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -236,6 +238,30 @@ services:
     tmpfs:
       - /tmp
 
+  egress-proxy:
+    # Sovereign egress proxy (H1 / Reliability ladder R2 — ee/, entitlement-gated).
+    # Derives each connection's destination host (HTTP CONNECT / TLS SNI), asks the
+    # backend control plane for a verdict (the ONE kernel decide() on host:), then
+    # splices or refuses. No TLS MITM. Per AD-E14 it degrades to its last-known
+    # allowlist when the backend is unreachable — it never opens.
+    #
+    # STAGED: DEFINED here for the cutover but profile-gated, so a default
+    # `docker compose up -d` does NOT start it — no image pull, so a fresh install
+    # comes up cleanly even before the GHCR image is published (degrade-to-safe). The
+    # route-cutover session enables it (COMPOSE_PROFILES=egress), must publish the image
+    # first, and only then reroutes the backend to make egress-proxy its ONLY exit
+    # (AD-E12). Until then this is fully inert. See ENFORCEMENT_ENGINE_SCOPING.md "H1".
+    profiles: ["egress"]
+    image: ghcr.io/${GHCR_OWNER}/damn-dev-egress-proxy:latest
+    restart: unless-stopped
+    environment:
+      EGRESS_PROXY_SECRET: ${EGRESS_PROXY_SECRET}
+      EGRESS_PROXY_PORT: "9100"
+      EGRESS_BACKEND_URL: http://backend:3001
+    networks:
+      - egress-net
+      - default
+
   backend:
     image: ghcr.io/${GHCR_OWNER}/damn-dev-backend:latest
     restart: unless-stopped
@@ -261,10 +287,16 @@ services:
       DAMN_DEV_VERSION_URL: https://damn.dev/version.json
       OPENCLAW_CONTAINER_NAME: ${OPENCLAW_CONTAINER_NAME:-openclaw}
       DOCKER_SOCKET_PROXY_URL: http://docker-socket-proxy:2375
+      # H1 egress proxy control-plane HMAC secret (the proxy authenticates with it).
+      # Inert until an H1 license + an egress policy engage the proxy.
+      EGRESS_PROXY_SECRET: ${EGRESS_PROXY_SECRET}
     networks:
       - default
       - proxy-net
       - exec-net
+      # Staged H1 link to the egress proxy. The backend KEEPS its direct egress
+      # (the `default` NAT network) this session — the route cutover is the follow-on.
+      - egress-net
     volumes:
       - damn_db:/data
       - /root/.openclaw:/home/node/.openclaw
@@ -345,6 +377,10 @@ networks:
   proxy-net:
     internal: true
   exec-net:
+    internal: true
+  # Private backend↔egress-proxy link (H1). internal:true: nothing routes off-box
+  # over it — the proxy's own internet egress rides the default (NAT) network.
+  egress-net:
     internal: true
 
 volumes:
