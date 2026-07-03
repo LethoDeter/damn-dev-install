@@ -10,6 +10,28 @@ info()    { echo -e "${BOLD}[damn.dev]${RESET} $*"; }
 success() { echo -e "${GREEN}[damn.dev]${RESET} $*"; }
 die()     { echo -e "${RED}[damn.dev] ERROR:${RESET} $*" >&2; exit 1; }
 
+# Resolve the bundled damndev OpenClaw plugin dir inside the globally-installed
+# @damn-dev/cli. pnpm's global layout varies by version: `pnpm root -g` returns
+# `.../global/5/node_modules` on pnpm 10 but `.../global/v11` (no node_modules
+# suffix) on pnpm 11 — so try both, then fall back to resolving through the
+# `damn-dev` bin symlink, which is layout-agnostic. Prints the path, or fails.
+resolve_damndev_plugin() {
+  local groot bin real pkg c
+  groot="$(pnpm root -g 2>/dev/null || true)"
+  for c in "${groot:+$groot/@damn-dev/cli}" "${groot:+$groot/node_modules/@damn-dev/cli}"; do
+    [[ -n "$c" && -d "$c/runtime/plugins/damndev" ]] && { printf '%s' "$c/runtime/plugins/damndev"; return 0; }
+  done
+  bin="$(command -v damn-dev 2>/dev/null || true)"
+  if [[ -n "$bin" ]]; then
+    real="$(node -e 'process.stdout.write(require("fs").realpathSync(process.argv[1]))' "$bin" 2>/dev/null || true)"
+    if [[ -n "$real" ]]; then
+      pkg="$(dirname "$(dirname "$real")")"   # <pkg>/bin/damn-dev.js → <pkg>
+      [[ -d "$pkg/runtime/plugins/damndev" ]] && { printf '%s' "$pkg/runtime/plugins/damndev"; return 0; }
+    fi
+  fi
+  return 1
+}
+
 DAMN_DEV_DIR="$HOME/.damn-dev"
 OPENCLAW_DIR="$HOME/.openclaw"
 PORT="${PORT:-3001}"
@@ -226,9 +248,8 @@ configure_openclaw() {
   # Copy bundled damndev plugin from the @damn-dev/cli package (installed above
   # via pnpm, so resolve through pnpm's global node_modules root).
   local plugin_src
-  plugin_src="$(pnpm root -g)/@damn-dev/cli/runtime/plugins/damndev"
-  if [[ ! -d "$plugin_src" ]]; then
-    die "damndev plugin not found at $plugin_src — the @damn-dev/cli install is broken."
+  if ! plugin_src="$(resolve_damndev_plugin)"; then
+    die "damndev plugin not found under the @damn-dev/cli install (pnpm root -g: $(pnpm root -g 2>/dev/null)). The install may be incomplete — re-run: curl -fsSL https://install.damn.dev/npm | bash"
   fi
   mkdir -p ~/openclaw-plugins
   rm -rf ~/openclaw-plugins/damndev
