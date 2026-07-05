@@ -19,16 +19,27 @@ success() { echo -e "${GREEN}[damn.dev]${RESET} $*"; }
 die()     { echo -e "${RED}[damn.dev] ERROR:${RESET} $*" >&2; exit 1; }
 
 # Resolve the bundled damndev OpenClaw plugin dir inside the globally-installed
-# @damn-dev/cli. pnpm's global layout varies by version: `pnpm root -g` returns
-# `.../global/5/node_modules` on pnpm 10 but `.../global/v11` (no node_modules
-# suffix) on pnpm 11 — so try both, then fall back to resolving through the
-# `damn-dev` bin symlink, which is layout-agnostic. Prints the path, or fails.
+# @damn-dev/cli. pnpm's global layout changes across versions and is NOT
+# discoverable by hardcoding `$(pnpm root -g)/node_modules/...`: pnpm 10 returns
+# `.../global/5/node_modules` (package under `.pnpm/...`), while pnpm 11 returns
+# `.../global/v11` (no node_modules suffix) with the real modules under a HASHED
+# subdir (`.../global/v11/<hash>/node_modules/...`). So ask pnpm directly for the
+# installed package path (layout-independent), then fall back to globbing every
+# known global-root shape, then to the `damn-dev` bin. Prints the path, or fails.
 resolve_damndev_plugin() {
   local groot bin real pkg c
+  # Authoritative + version-independent: pnpm prints the resolved package dir.
+  pkg="$(pnpm ls -g --parseable --depth 0 2>/dev/null | grep -E '/@damn-dev/cli$' | head -1)"
+  [[ -n "$pkg" && -d "$pkg/runtime/plugins/damndev" ]] && { printf '%s' "$pkg/runtime/plugins/damndev"; return 0; }
+  # Fallback: try known global-root layouts. The unquoted glob covers pnpm 11's
+  # hashed subdir (`$groot/*/node_modules/@damn-dev/cli`); no match leaves the
+  # literal path, which the `-d` test rejects safely.
   groot="$(pnpm root -g 2>/dev/null || true)"
-  for c in "${groot:+$groot/@damn-dev/cli}" "${groot:+$groot/node_modules/@damn-dev/cli}"; do
+  for c in "${groot:+$groot/@damn-dev/cli}" "${groot:+$groot/node_modules/@damn-dev/cli}" ${groot:+$groot/*/node_modules/@damn-dev/cli}; do
     [[ -n "$c" && -d "$c/runtime/plugins/damndev" ]] && { printf '%s' "$c/runtime/plugins/damndev"; return 0; }
   done
+  # Last resort: resolve through the damn-dev bin (a pnpm shim on pnpm installs,
+  # so this rarely resolves the package — kept as belt-and-suspenders).
   bin="$(command -v damn-dev 2>/dev/null || true)"
   if [[ -n "$bin" ]]; then
     real="$(node -e 'process.stdout.write(require("fs").realpathSync(process.argv[1]))' "$bin" 2>/dev/null || true)"
@@ -510,9 +521,17 @@ install_damn_dev() {
 
   command -v damn-dev &>/dev/null || die "@damn-dev/cli installed but 'damn-dev' is not on PATH. Open a new terminal and re-run, or add pnpm's global bin to PATH."
 
-  # The damndev OpenClaw plugin ships inside the @damn-dev/cli package.
+  # The damndev OpenClaw plugin ships inside the @damn-dev/cli package. Ask the
+  # CLI where it is — `damn-dev plugin-path` resolves it from the package's own
+  # location, so it's independent of pnpm's global layout (which changes across
+  # versions and broke the grep-based locator on pnpm 11). Fall back to the
+  # layout-sniffing resolver for older CLIs that predate `plugin-path`.
   local plugin_src
-  if ! plugin_src="$(resolve_damndev_plugin)"; then
+  plugin_src="$(damn-dev plugin-path 2>/dev/null || true)"
+  if [[ -z "$plugin_src" || ! -d "$plugin_src" ]]; then
+    plugin_src="$(resolve_damndev_plugin || true)"
+  fi
+  if [[ -z "$plugin_src" || ! -d "$plugin_src" ]]; then
     die "damndev plugin not found under the @damn-dev/cli install (pnpm root -g: $(pnpm root -g 2>/dev/null)). The install may be incomplete — re-run: curl -fsSL https://install.damn.dev/docker | bash"
   fi
   mkdir -p ~/openclaw-plugins
