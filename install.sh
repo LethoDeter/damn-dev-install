@@ -12,6 +12,15 @@ success() { echo -e "${GREEN}[damn.dev]${RESET} $*"; }
 warn()    { echo -e "${YELLOW}[damn.dev]${RESET} $*"; }
 die()     { echo -e "${RED}[damn.dev] ERROR:${RESET} $*" >&2; exit 1; }
 
+# ── Root required ────────────────────────────────────────────────────────────
+# This installer writes /opt/damn-dev + mounts /root/.openclaw + /root/.damn-dev,
+# so it only works when $HOME == /root, i.e. actually root. Running as a sudo user
+# (where $HOME may be /home/user) half-runs and splits state. Fail fast before any
+# secret gen or mkdir.
+if [ "$(id -u)" -ne 0 ]; then
+  die "This installer must run as root. Do:  sudo -i   then re-run the curl command."
+fi
+
 
 echo ""
 echo -e "${BOLD}damn.dev — self-hosted installer${RESET}"
@@ -59,14 +68,41 @@ fi
 
 echo ""
 
-# ── Generate secrets ─────────────────────────────────────────────────────────
+# ── Generate / reuse secrets (idempotent) ────────────────────────────────────
+# Persist generated secrets so a re-run (or a partial run + retry) REUSES them.
+# Regenerating OPENCLAW_TOKEN on a re-run desyncs the backend from the already-
+# running OpenClaw (→ 401 Unauthorized on every agent call); regenerating
+# BETTER_AUTH_SECRET separately invalidates every logged-in session.
+PERSIST_ENV=/root/.damn-dev/secrets.env
+mkdir -p /root/.damn-dev
+# shellcheck disable=SC1090
+[ -f "$PERSIST_ENV" ] && . "$PERSIST_ENV"
 
-BETTER_AUTH_SECRET=$(openssl rand -hex 32)
-DAMNDEV_OUTBOUND_SECRET=$(openssl rand -hex 32)
-OPENCLAW_TOKEN=$(openssl rand -hex 32)
-SHELL_EXECUTOR_SECRET=$(openssl rand -hex 32)
-EGRESS_PROXY_SECRET=$(openssl rand -hex 32)
+# Belt-and-braces: if OpenClaw already has a config, its gateway.auth.token is the
+# ground truth (that's what OpenClaw validates against) — prefer it over anything
+# persisted or freshly generated, so the backend can never drift from a running gateway.
+if [ -f /root/.openclaw/openclaw.json ]; then
+  EXISTING_OC_TOKEN=$(grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' /root/.openclaw/openclaw.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  [ -n "${EXISTING_OC_TOKEN:-}" ] && OPENCLAW_TOKEN="$EXISTING_OC_TOKEN"
+fi
+
+BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-$(openssl rand -hex 32)}
+DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET:-$(openssl rand -hex 32)}
+OPENCLAW_TOKEN=${OPENCLAW_TOKEN:-$(openssl rand -hex 32)}
+SHELL_EXECUTOR_SECRET=${SHELL_EXECUTOR_SECRET:-$(openssl rand -hex 32)}
+EGRESS_PROXY_SECRET=${EGRESS_PROXY_SECRET:-$(openssl rand -hex 32)}
 OPENCLAW_URL="http://openclaw:18789"
+
+# Persist for the next run (0600). Chowned to uid 1000 later alongside the rest of
+# /root/.damn-dev so the backend can also read it.
+cat > "$PERSIST_ENV" <<PERSIST_EOF
+BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
+OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
+SHELL_EXECUTOR_SECRET=${SHELL_EXECUTOR_SECRET}
+EGRESS_PROXY_SECRET=${EGRESS_PROXY_SECRET}
+PERSIST_EOF
+chmod 600 "$PERSIST_ENV"
 
 # ── Write .env ───────────────────────────────────────────────────────────────
 
@@ -423,6 +459,11 @@ info "Pulling and starting containers (this takes ~2 minutes on first run)..."
 # can both read/write it. Without this Docker auto-creates the bind source root-owned
 # and the backend (uid 1000) can't create agent dirs. See CONTAINMENT_EXECUTOR_PLAN.md.
 mkdir -p /root/.openclaw/agents && chown -R 1000:1000 /root/.openclaw
+# The backend (uid 1000) mounts /root/.damn-dev and writes secrets.key there to
+# AES-encrypt provider/workspace secrets. Docker auto-creates the bind source
+# root-owned, so without this chown uid 1000 can't create secrets.key → provider
+# keys silently fail to persist. Runs AFTER PERSIST_ENV is written above.
+mkdir -p /root/.damn-dev && chown -R 1000:1000 /root/.damn-dev
 
 docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" up -d
 
