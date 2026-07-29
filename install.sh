@@ -247,6 +247,20 @@ services:
       # probes via docker exec, and the backend reaches OpenClaw over container DNS
       # (OPENCLAW_URL=http://openclaw:18789), not through this port.
       - "127.0.0.1:18789:18789"
+    # Map the Docker host so a HOST-LOCAL model server (Ollama/vLLM on this VPS,
+    # e.g. a GPU box) is reachable. resolveOllamaBaseUrl() in lib/openclaw.ts writes
+    # http://host.docker.internal:11434/v1 for docker-vps, but on Linux that name does
+    # NOT resolve inside a container unless it is mapped here — so before this line the
+    # URL it wrote was unresolvable and any vllm/* model on docker-vps was dead config.
+    # Grants nothing new: the container could already reach the host IP over the default
+    # bridge; this only gives it a name. Harmless when no local model server exists.
+    #
+    # ⚠️ IN TENSION WITH THE H1 FENCE: once `- default` is removed below, OpenClaw has
+    # only the internal egress-net, which has no gateway — so the host bridge is
+    # unreachable and a host-local model provider stops working. Fence and host-local
+    # models are mutually exclusive by design (the fence removes every non-proxy route).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${HOME}/.openclaw:/home/node/.openclaw
     environment:
@@ -283,7 +297,12 @@ services:
       # LOAD-BEARING: OpenClaw must keep reaching http://backend:3001/webhooks/openclaw
       # directly. Without `backend` here that call is sent to the egress proxy, which
       # refuses it as non-allowlisted, and every agent reply + heartbeat delivery dies.
-      - NO_PROXY=backend,localhost,127.0.0.1,.local
+      # host.docker.internal is defence-in-depth, NOT currently load-bearing: it only
+      # matters IF a host-local model server exists (see extra_hosts above). With one,
+      # this keeps its calls direct instead of routing them at the internet proxy.
+      # With none, the entry is inert. Listed so enabling a local provider later cannot
+      # silently break it.
+      - NO_PROXY=backend,localhost,127.0.0.1,host.docker.internal,.local
     networks:
       # damn-dev_default — the NAT exit OpenClaw has always used, and the network the
       # backend shares with it for container DNS.
