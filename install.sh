@@ -125,14 +125,40 @@ REGISTRATION_MODE=closed
 DAMNDEV_CONTAINERIZED=true
 DAMNDEV_INSTALL_PATH=docker-vps
 DAMN_DEV_VERSION_URL=https://damn.dev/version.json
+# H1 sovereign egress proxy — OpenClaw's outbound proxy URL. EMPTY = inert (Node
+# ignores an empty HTTP(S)_PROXY, so OpenClaw egresses directly, as it always has).
+# Set to http://egress-proxy:9100 to route the agent runtime through the proxy; see
+# the enable runbook (publish the image → COMPOSE_PROFILES=egress → set this →
+# capabilities.egress: 'audit'). Read on every recreate, so a backend-initiated
+# OpenClaw restart keeps it.
+OPENCLAW_EGRESS_PROXY_URL=
 EOF
 
 success ".env written to $ENV_FILE"
 
 # ── OpenClaw ──────────────────────────────────────────────────────────────────
 
+# OpenClaw health, independent of the published port.
+#
+# VERIFIED 2026-07-29 (moby source + moby#36174 + empirical): a container attached
+# ONLY to an `internal: true` network never gets a gateway endpoint, so Docker never
+# programs the host→container DNAT — a `ports:` mapping there is a SILENT no-op
+# (accepted, listed in HostConfig.PortBindings, never realised, no warning). So once
+# the H1 egress fence below is applied, `curl localhost:18789/health` stops answering
+# while OpenClaw is perfectly healthy. Probe from INSIDE the container as the
+# fallback; `node` is guaranteed present in the image.
+openclaw_healthy() {
+  curl -sf http://localhost:18789/health > /dev/null 2>&1 && return 0
+  docker exec openclaw node -e \
+    "require('http').get('http://127.0.0.1:18789/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" \
+    > /dev/null 2>&1
+}
+
 setup_openclaw_vps() {
-  if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
+  # Also the guard that makes a re-run non-destructive: a healthy OpenClaw means we
+  # do NOT rewrite docker-compose.openclaw.yml, which is what preserves an operator's
+  # H1 fence edit (see the fence note in the compose file below).
+  if openclaw_healthy; then
     info "OpenClaw already running."
     return 0
   fi
@@ -215,19 +241,82 @@ services:
     image: ghcr.io/lethodeter/openclaw-hardened:latest
     container_name: openclaw
     ports:
+      # Convenience/diagnostic mapping. A SILENT NO-OP once the H1 fence below is
+      # applied (a container on an internal:true network gets no gateway endpoint, so
+      # Docker never programs the DNAT). Nothing may depend on it — the installer
+      # probes via docker exec, and the backend reaches OpenClaw over container DNS
+      # (OPENCLAW_URL=http://openclaw:18789), not through this port.
       - "127.0.0.1:18789:18789"
     volumes:
       - ${HOME}/.openclaw:/home/node/.openclaw
     environment:
       - OPENCLAW_GATEWAY_BIND=lan
+      # ── H1 sovereign egress proxy (docker-vps only) ───────────────────────────
+      # CEILING (the only sentence the product may use for this): host-granular
+      # egress control for the agent runtime, enforced by the Docker daemon's network
+      # topology on docker-vps. It records or blocks connections by destination host.
+      # It does NOT inspect content and does NOT stop exfiltration through an allowed
+      # host. In 'audit' mode: recording only — nothing is blocked yet. This holds on
+      # docker-vps ONLY; on docker-local/Tauri OpenClaw's container mounts docker.sock
+      # (so the topology is escapable from inside) and on npm OpenClaw is a native
+      # process with no container at all — never extend the claim to those paths.
+      #
+      # Explicit proxy, NOT transparent interception: OpenClaw is told to send
+      # outbound traffic to egress-proxy:9100, which derives the destination host
+      # (CONNECT / TLS SNI), asks the backend for the ONE kernel decide() verdict,
+      # then splices or refuses. No TLS MITM, no iptables, no NET_ADMIN.
+      #
+      # EMPTY BY DEFAULT = PROVABLY INERT. Node installs its env-proxy agent only
+      # when HTTP_PROXY/HTTPS_PROXY is non-empty (verified in Node v24
+      # lib/internal/process/pre_execution.js), so an unset value changes nothing —
+      # a fresh install behaves exactly as before. To engage, set
+      # OPENCLAW_EGRESS_PROXY_URL=http://egress-proxy:9100 in /opt/damn-dev/.env
+      # (see the enable runbook) — the value is read on every recreate, including a
+      # backend-initiated restartOpenClaw().
+      - HTTPS_PROXY=\${OPENCLAW_EGRESS_PROXY_URL:-}
+      - HTTP_PROXY=\${OPENCLAW_EGRESS_PROXY_URL:-}
+      # Node 24: makes fetch() (v24.0+) and http/https.request() (v24.5+) honour the
+      # proxy env. It does NOT cover raw net/tls sockets, so anything speaking its own
+      # socket is unproxied — with the fence applied such traffic loses its route
+      # entirely rather than escaping (fail-closed, but a visible regression).
+      - NODE_USE_ENV_PROXY=1
+      # LOAD-BEARING: OpenClaw must keep reaching http://backend:3001/webhooks/openclaw
+      # directly. Without `backend` here that call is sent to the egress proxy, which
+      # refuses it as non-allowlisted, and every agent reply + heartbeat delivery dies.
+      - NO_PROXY=backend,localhost,127.0.0.1,.local
+    networks:
+      # damn-dev_default — the NAT exit OpenClaw has always used, and the network the
+      # backend shares with it for container DNS.
+      #
+      # ↓↓ THE H1 FENCE ↓↓  Deleting this ONE line makes egress-proxy the ONLY exit:
+      # egress-net is internal:true, so there is no other route off-box and an agent
+      # that unsets HTTPS_PROXY gets no internet at all rather than ungated internet.
+      # That is what makes the guarantee topological instead of cooperative.
+      #
+      # It is NOT removed here on purpose: egress-proxy is profile-gated
+      # (COMPOSE_PROFILES=egress) so a default install does not start it, and removing
+      # this line while the proxy is down would leave OpenClaw with NO egress at all.
+      # Remove it only as the last step of the enable runbook, after the proxy is up.
+      - default
+      - egress-net
     restart: unless-stopped
+
+networks:
+  # Declared with the SAME key (egress-net) and the SAME internal flag as
+  # docker-compose.prod.yml. Both files live in /opt/damn-dev so they share the
+  # compose project name `damn-dev`; same project + same key ⇒ both resolve to the
+  # ONE damn-dev_egress-net network, whichever file creates it first. This is the
+  # same mechanism the two files already rely on for damn-dev_default. Keep the two
+  # declarations identical — if they diverge, compose refuses to adopt the network.
+  egress-net:
+    internal: true
 COMPOSE_MARKER
 
   docker compose -f /opt/damn-dev/docker-compose.openclaw.yml up -d
   info "Waiting for OpenClaw..."
   for i in $(seq 1 30); do
     sleep 2
-    if curl -sf http://localhost:18789/health > /dev/null 2>&1; then
+    if openclaw_healthy; then
       success "OpenClaw ready."
       return 0
     fi
