@@ -357,13 +357,26 @@ OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
 BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
 DOMAIN=${DOMAIN}
 DAMNDEV_OUTBOUND_SECRET=${DAMNDEV_OUTBOUND_SECRET}
+PORT=${PORT}
 ENV_EOF
+}
+
+# Mirrors install-docker.sh's check_port. Without it the installer wrote a config
+# for :PORT, the backend failed to bind because a neighbour app already held it,
+# and the only symptom was the health wait timing out with no reason given.
+# Runs AFTER the stop below so re-running the installer isn't blocked by our own
+# still-running backend.
+check_port() {
+  if lsof -iTCP:"${PORT}" -sTCP:LISTEN &>/dev/null 2>&1; then
+    die "Port ${PORT} is already in use by another process. Re-run with a different port: PORT=3002 curl ${INSTALL_BASE_URL}/install-local.sh | bash"
+  fi
 }
 
 start_damn_dev() {
   # damn-dev CLI manages its own pidfile (writes to ~/.damn-dev/damn-dev.pid).
   # Re-running start when already up is refused by the CLI, so stop first.
   damn-dev stop >/dev/null 2>&1 || true
+  check_port
   damn-dev start --port "$PORT"
 
   info "Waiting for damn.dev to start..."
