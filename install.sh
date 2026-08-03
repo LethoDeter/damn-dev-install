@@ -68,6 +68,33 @@ fi
 
 echo ""
 
+# ── Enterprise (paid) modules — optional ─────────────────────────────────────
+# EE_DELIVERY_SCOPING.md §6b C6. Governance and observation are FREE forever and
+# need nothing here: skipping leaves the install byte-for-byte as it was before
+# this block existed — no docker login, no COMPOSE_PROFILES, and the ee-loader
+# service is not even resolved by compose, so the private image is never
+# referenced or pulled.
+#
+# A paying customer has a pull-only registry.damn.dev account (one per customer,
+# minted alongside their licence by scripts/licenses.mjs, revocable on its own).
+# Presetting EE_REGISTRY_USERNAME/EE_REGISTRY_PASSWORD in the environment skips
+# the prompts for an unattended install.
+EE_REGISTRY_USERNAME="${EE_REGISTRY_USERNAME:-}"
+EE_REGISTRY_PASSWORD="${EE_REGISTRY_PASSWORD:-}"
+info "Enterprise modules (optional — press Enter to skip; governance is free forever)"
+if [[ -z "$EE_REGISTRY_USERNAME" ]]; then
+  read -rp "  registry.damn.dev username [leave blank to skip]: " EE_REGISTRY_USERNAME </dev/tty
+fi
+if [[ -n "$EE_REGISTRY_USERNAME" && -z "$EE_REGISTRY_PASSWORD" ]]; then
+  # -s: never echoed to the terminal, and never passed as an argument to anything
+  # (see the docker login below — it goes in on stdin, so it stays out of `ps`).
+  read -rsp "  registry.damn.dev password: " EE_REGISTRY_PASSWORD </dev/tty
+  echo ""
+  [[ -z "$EE_REGISTRY_PASSWORD" ]] && die "The registry password cannot be empty. Re-run and leave the username blank to install without paid modules."
+fi
+
+echo ""
+
 # ── Generate / reuse secrets (idempotent) ────────────────────────────────────
 # Persist generated secrets so a re-run (or a partial run + retry) REUSES them.
 # Regenerating OPENCLAW_TOKEN on a re-run desyncs the backend from the already-
@@ -133,6 +160,15 @@ DAMN_DEV_VERSION_URL=https://damn.dev/version.json
 # OpenClaw restart keeps it.
 OPENCLAW_EGRESS_PROXY_URL=
 EOF
+
+# Paid install only: persist the profile so EVERY later `docker compose --env-file`
+# (restart, update, manual up) keeps delivering paid modules. Compose reads
+# COMPOSE_PROFILES out of the env file — verified against Compose v2/v5. NEVER write
+# the registry password here: docker keeps its own credential store, and this file
+# is read by every container in the stack.
+if [[ -n "$EE_REGISTRY_USERNAME" ]]; then
+  echo "COMPOSE_PROFILES=ee" >> "$ENV_FILE"
+fi
 
 success ".env written to $ENV_FILE"
 
@@ -639,6 +675,17 @@ mkdir -p /root/.openclaw/agents && chown -R 1000:1000 /root/.openclaw
 # keys silently fail to persist. Runs AFTER PERSIST_ENV is written above.
 mkdir -p /root/.damn-dev && chown -R 1000:1000 /root/.damn-dev
 
+# Paid install only: authenticate to the private paid-artifact registry so the
+# profile-gated ee-loader can pull. A free install never reaches this branch and
+# never authenticates to anything. --password-stdin, never --password: an argument
+# would be visible in `ps` on a shared box and land in root's shell history.
+if [[ -n "$EE_REGISTRY_USERNAME" ]]; then
+  info "Authenticating to registry.damn.dev for enterprise modules..."
+  printf '%s' "$EE_REGISTRY_PASSWORD" \
+    | docker login registry.damn.dev --username "$EE_REGISTRY_USERNAME" --password-stdin \
+    || die "docker login registry.damn.dev failed. Check the username/password you were issued, or re-run and leave the username blank to install without paid modules."
+fi
+
 docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" up -d
 
 echo ""
@@ -648,4 +695,10 @@ echo ""
 echo "  First login:  create an account at https://${DOMAIN}"
 echo "  View logs:    docker compose -f $INSTALL_DIR/docker-compose.prod.yml logs -f"
 echo "  Stop:         docker compose -f $INSTALL_DIR/docker-compose.prod.yml down"
+if [[ -n "$EE_REGISTRY_USERNAME" ]]; then
+  echo ""
+  echo "  Enterprise modules: delivered to /app/ee (COMPOSE_PROFILES=ee is persisted in"
+  echo "                      $INSTALL_DIR/.env). Apply your licence in Settings → License;"
+  echo "                      paid features stay off until an entitlement is present."
+fi
 echo ""
