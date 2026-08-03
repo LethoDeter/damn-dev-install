@@ -468,12 +468,36 @@ services:
       # routes through when wire-level egress is ENGAGED. Inert on its own:
       # resolveBrowserProxy() also requires resolveEgressEngagement().engaged.
       EGRESS_PROXY_URL: http://egress-proxy:9100
+      # ── P0b — the BACKEND's OWN outbound traffic ────────────────────────────
+      # This is what carries HTTP skill dispatch (skillToolDispatcher) and
+      # direct-gateway model calls (anthropic/openrouter/claude-code/ollama). Proxying
+      # OpenClaw and the browser leaves this path open, so the claim "the agent cannot
+      # reach that host" is false without it.
+      #
+      # DISTINCT from EGRESS_PROXY_URL above. That one is an ADDRESS the browser code
+      # reads, gated by resolveEgressEngagement(), which is why shipping it real is
+      # safe. THIS one is consumed by NODE ITSELF with no engagement gate, so it ships
+      # EMPTY: Node installs its env-proxy agent only when HTTP(S)_PROXY is non-empty
+      # (v24 lib/internal/process/pre_execution.js), making an unset value a no-op.
+      HTTPS_PROXY: ${BACKEND_EGRESS_PROXY_URL:-}
+      HTTP_PROXY: ${BACKEND_EGRESS_PROXY_URL:-}
+      # Covers fetch (v24.0+) and http/https.request (v24.5+). NOT raw net/tls sockets.
+      NODE_USE_ENV_PROXY: "1"
+      # LOAD-BEARING: every container-internal peer the backend talks to. Miss one and
+      # that call is sent to the egress proxy, refused as non-allowlisted, and the
+      # failure reads as a proxy bug rather than a config gap. `watchtower` is the
+      # non-obvious one — the in-product Update button calls http://watchtower:8080.
+      NO_PROXY: openclaw,shell-executor,docker-socket-proxy,watchtower,egress-proxy,backend,frontend,localhost,127.0.0.1,host.docker.internal,.local
     networks:
+      # ↓↓ THE H1 BACKEND FENCE ↓↓ Deleting this ONE line makes egress-proxy the only
+      # exit for the backend as well. NOT removed here: egress-proxy is profile-gated,
+      # so cutting this while the proxy is down leaves the backend with NO egress at
+      # all (the same structural collision as the OpenClaw fence — Compose cannot
+      # conditionally detach a network). Remove it only as a deliberate runbook step,
+      # after the proxy is up AND BACKEND_EGRESS_PROXY_URL is set.
       - default
       - proxy-net
       - exec-net
-      # Staged H1 link to the egress proxy. The backend KEEPS its direct egress
-      # (the `default` NAT network) this session — the route cutover is the follow-on.
       - egress-net
     volumes:
       - damn_db:/data
