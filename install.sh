@@ -679,11 +679,21 @@ mkdir -p /root/.damn-dev && chown -R 1000:1000 /root/.damn-dev
 # profile-gated ee-loader can pull. A free install never reaches this branch and
 # never authenticates to anything. --password-stdin, never --password: an argument
 # would be visible in `ps` on a shared box and land in root's shell history.
+#
 if [[ -n "$EE_REGISTRY_USERNAME" ]]; then
   info "Authenticating to registry.damn.dev for enterprise modules..."
   printf '%s' "$EE_REGISTRY_PASSWORD" \
     | docker login registry.damn.dev --username "$EE_REGISTRY_USERNAME" --password-stdin \
     || die "docker login registry.damn.dev failed. Check the username/password you were issued, or re-run and leave the username blank to install without paid modules."
+
+  # Run the one-shot loader explicitly, with the profile named on the command line.
+  # COMPOSE_PROFILES in .env is what carries the setting into every LATER compose
+  # invocation on this box; naming it here means THIS run does not depend on which
+  # Compose version the box happens to have. It also lands /app/ee before the backend
+  # starts, rather than racing it.
+  info "Delivering enterprise modules..."
+  docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" --profile ee up -d ee-loader \
+    || die "Could not pull the enterprise modules from registry.damn.dev. The credential authenticated, so this is likely a network or registry issue — re-run once it is reachable."
 fi
 
 docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" up -d
