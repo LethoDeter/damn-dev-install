@@ -406,6 +406,35 @@ services:
       - egress-net
       - default
 
+  ee-loader:
+    # Paid-module delivery (EE_DELIVERY_SCOPING.md §6b C3). Copies ee/dist out of the
+    # PRIVATE damn-dev-ee image into a named volume; the backend mounts that volume
+    # read-only at /app/ee — exactly where loadEeEgress() already looks. ZERO backend
+    # code change: the seam (apps/backend/src/lib/egressGate.ts) predates this and
+    # already tries both walk-up depths.
+    #
+    # PROFILE-GATED, and that is the whole degrade-safe property. With no profile set
+    # compose does not resolve this service at all, so a FREE install never references
+    # the private image and never attempts a pull it has no credentials for. Verified
+    # empirically: with the profile off "docker compose pull" succeeds and omits this
+    # image entirely, even while registry.damn.dev does not resolve at all.
+    #
+    # NEVER give the backend a depends_on for this service. Verified: with the profile
+    # off, compose rejects the WHOLE project with "service backend depends on undefined
+    # service ee-loader: invalid compose project" — that breaks every free install
+    # outright rather than gracefully. The start ordering it would buy is not needed:
+    # resolveEgressEngagement() re-imports the module on EVERY call (no memoisation),
+    # so a backend that raced ahead of this copy self-heals on its next call.
+    #
+    # No restart policy on purpose: this is a one-shot that must exit 0, not a service.
+    # Paid install: COMPOSE_PROFILES=ee docker compose up -d
+    profiles: ["ee"]
+    image: registry.damn.dev/damn-dev-ee:latest
+    # rm first, so a module REMOVED in a later release cannot linger in the volume.
+    command: sh -c "rm -rf /target/* && cp -a /ee/. /target/"
+    volumes:
+      - ee_dist:/target
+
   backend:
     image: ghcr.io/${GHCR_OWNER}/damn-dev-backend:latest
     restart: unless-stopped
@@ -445,6 +474,11 @@ services:
       - damn_db:/data
       - /root/.openclaw:/home/node/.openclaw
       - /root/.damn-dev:/home/node/.damn-dev
+      # Paid (ee/) modules, delivered by the profile-gated ee-loader above. READ-ONLY:
+      # the backend loads these, never writes them. On a free install the volume is
+      # simply empty, the dynamic import fails, and the seam reports not-engaged —
+      # byte-for-byte the behaviour before this mount existed.
+      - ee_dist:/app/ee:ro
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1))"]
       interval: 30s
@@ -531,6 +565,9 @@ volumes:
   damn_db:
   caddy_data:
   caddy_config:
+  # Paid (ee/) modules — populated ONLY by the profile-gated ee-loader. Empty on a
+  # free install, which is exactly the pre-existing not-engaged behaviour.
+  ee_dist:
 COMPOSE_EOF
 
 cat > "$INSTALL_DIR/Caddyfile" <<'CADDY_EOF'
