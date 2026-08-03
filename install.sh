@@ -463,6 +463,11 @@ services:
       # H1 egress proxy control-plane HMAC secret (the proxy authenticates with it).
       # Inert until an H1 license + an egress policy engage the proxy.
       EGRESS_PROXY_SECRET: ${EGRESS_PROXY_SECRET}
+      # P0c — the address the BROWSER (camoufox: a child process of this backend, with
+      # its own network stack, so it is NOT covered by proxying the backend itself)
+      # routes through when wire-level egress is ENGAGED. Inert on its own:
+      # resolveBrowserProxy() also requires resolveEgressEngagement().engaged.
+      EGRESS_PROXY_URL: http://egress-proxy:9100
     networks:
       - default
       - proxy-net
