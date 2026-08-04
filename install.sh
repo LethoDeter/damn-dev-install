@@ -105,12 +105,21 @@ mkdir -p /root/.damn-dev
 # shellcheck disable=SC1090
 [ -f "$PERSIST_ENV" ] && . "$PERSIST_ENV"
 
-# Belt-and-braces: if OpenClaw already has a config, its gateway.auth.token is the
-# ground truth (that's what OpenClaw validates against) — prefer it over anything
-# persisted or freshly generated, so the backend can never drift from a running gateway.
+# Belt-and-braces: openclaw.json is the ground truth for BOTH shared secrets, because
+# for each one the OTHER side is the party we cannot reconfigure from here —
+#   gateway.auth.token          → what OpenClaw VALIDATES backend→gateway calls against
+#   damndev inboundSharedSecret → what the plugin SIGNS gateway→backend calls with
+# so prefer both over anything persisted or freshly generated. Without the second
+# read-back a re-run against a healthy OpenClaw (which skips the openclaw.json write)
+# handed the backend a fresh DAMNDEV_OUTBOUND_SECRET while the plugin kept signing with
+# the old one → every /skills/exec 401'd with no self-heal.
+# `if`, not `[ … ] && …`: under `set -e` a failed test as the last command of the block
+# aborts the whole install.
 if [ -f /root/.openclaw/openclaw.json ]; then
   EXISTING_OC_TOKEN=$(grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' /root/.openclaw/openclaw.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-  [ -n "${EXISTING_OC_TOKEN:-}" ] && OPENCLAW_TOKEN="$EXISTING_OC_TOKEN"
+  if [ -n "${EXISTING_OC_TOKEN:-}" ]; then OPENCLAW_TOKEN="$EXISTING_OC_TOKEN"; fi
+  EXISTING_INBOUND_SECRET=$(grep -o '"inboundSharedSecret"[[:space:]]*:[[:space:]]*"[^"]*"' /root/.openclaw/openclaw.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  if [ -n "${EXISTING_INBOUND_SECRET:-}" ]; then DAMNDEV_OUTBOUND_SECRET="$EXISTING_INBOUND_SECRET"; fi
 fi
 
 BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-$(openssl rand -hex 32)}
