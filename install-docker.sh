@@ -327,6 +327,9 @@ write_openclaw_config() {
       "match": { "channel": "damndev", "accountId": "default" }
     }
   ],
+  "channels": {
+    "damndev": { "healthMonitor": { "enabled": true, "interval": 300 } }
+  },
   "agents": {
     "defaults": {
       "sandbox": {
