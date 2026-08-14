@@ -378,6 +378,24 @@ services:
     image: ghcr.io/${GHCR_OWNER}/openclaw-hardened:latest
     container_name: damn-dev-openclaw
     user: "${HOST_UID}:${HOST_GID}"
+    # ── config self-heal, before the gateway validates anything ────────────────
+    # OpenClaw >= 2026.6.11 hard-REJECTS a pre-6.11 config (agents.defaults:
+    # Invalid input) and refuses to start, so an existing install cannot boot its
+    # way onto the new image unaided. doctor --fix does the whole migration in one
+    # pass: embeddedPi becomes embeddedAgent, openai-codex/* folds into openai/* +
+    # agentRuntime, and cron + per-agent auth profiles import into SQLite, keeping
+    # openclaw.json.bak.
+    #
+    # Overrides command ONLY, never entrypoint. The image entrypoint is tini -s --
+    # and replacing it would drop the init that reaps zombies.
+    #
+    # Separator is ';' not '&&': a doctor failure must not stop the gateway. If the
+    # config is broken the gateway's own strict validation fails loudly instead,
+    # which is the honest gate.
+    command:
+      - sh
+      - -c
+      - openclaw doctor --fix; rc=\$\$?; echo "[boot] openclaw doctor --fix exit=\$\$rc"; exec node openclaw.mjs gateway
     ports:
       - "18789:18789"
     volumes:

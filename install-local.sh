@@ -71,13 +71,26 @@ check_node() { ensure_node_22; }
 # Require Node 22+ because better-auth (and other modern deps) are ESM-only;
 # CommonJS require() of ESM is only supported unflagged on Node 22+.
 #
+# The FLOOR IS NOW 22.22.3, not bare "major >= 22". OpenClaw 2026.7.1 raised its
+# own engines to ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" and it does not warn
+# — the CLI REFUSES to start. A host on e.g. 22.18.0 passed the old check, then
+# `npm install -g openclaw` below installed a version that would not run, and
+# every agent stopped. Only this path is exposed: every docker path bundles its
+# own Node inside the image. Mirrors the pre-flight in updateOpenClaw().
+#
+# Node 23 is deliberately excluded — it is outside OpenClaw's supported range.
+#
 # Tiered upgrade flow: same as install-docker.sh.
-#   1. Node >= 22 already → continue
+#   1. Node already satisfies the range → continue
 #   2. Homebrew present → offer brew install node@22 (Y/n)
 #   3. No brew → point at damn.dev DMG desktop app + nodejs.org fallback
 ensure_node_22() {
   if command -v node &>/dev/null && \
-     node -e "process.exit(parseInt(process.version.slice(1)) < 22 ? 1 : 0)" 2>/dev/null; then
+     node -e "const v=process.versions.node.split('.').map(Number);
+              const ok = (v[0]===22 && (v[1]>22 || (v[1]===22 && v[2]>=3)))
+                      || (v[0]===24 && (v[1]>15 || (v[1]===15 && v[2]>=0)))
+                      ||  v[0]>=25;
+              process.exit(ok ? 0 : 1)" 2>/dev/null; then
     info "Node.js $(node --version) detected."
     return 0
   fi
@@ -85,7 +98,7 @@ ensure_node_22() {
   local current
   current=$(command -v node &>/dev/null && node --version 2>/dev/null || echo "(not installed)")
   echo ""
-  info "Node.js 22+ is required — damn.dev depends on ESM modules only supported on Node 22+."
+  info "Node.js 22.22.3+ (or 24.15+) is required — damn.dev needs ESM support, and OpenClaw 2026.7.1+ refuses to start on anything older."
   info "Currently: $current"
   echo ""
 
@@ -305,6 +318,7 @@ configure_openclaw() {
   "plugins": {
     "load": { "paths": ["~/openclaw-plugins/damndev"] },
     "entries": {
+      "admin-http-rpc": { "enabled": true },
       "damndev": {
         "enabled": true,
         "config": {
@@ -332,6 +346,19 @@ start_openclaw() {
       kill "$(cat "$DAMN_DEV_DIR/openclaw.pid")" 2>/dev/null || true
       sleep 2
     fi
+  fi
+
+  # Migrate the config before starting. OpenClaw >= 2026.6.11 hard-REJECTS a
+  # pre-6.11 config (agents.defaults: Invalid input) and refuses to start, so an
+  # existing install cannot come back up on a newer openclaw without this. Does
+  # the whole migration in one pass (embeddedPi -> embeddedAgent, openai-codex/*
+  # -> openai/* + agentRuntime, cron + per-agent auth into SQLite) and keeps
+  # openclaw.json.bak. Best-effort: a doctor failure must not block the start —
+  # the gateway's own strict validation is the honest gate, and the health wait
+  # below is what actually reports failure.
+  info "Migrating OpenClaw config (doctor --fix)..."
+  if ! openclaw doctor --fix >> "$DAMN_DEV_DIR/openclaw.log" 2>&1; then
+    info "openclaw doctor --fix exited non-zero — continuing; see $DAMN_DEV_DIR/openclaw.log"
   fi
 
   info "Starting OpenClaw..."
