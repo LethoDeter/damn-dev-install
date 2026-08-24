@@ -450,6 +450,55 @@ services:
     tmpfs:
       - /tmp
 
+  shell-supervisor:
+    # Per-agent shell executors (Containment Floor H3.5 — SPIKE, see
+    # CONTAINMENT_EXECUTOR_PLAN.md §14). Creates one executor container per agent,
+    # each mounting ONLY that agent's own directory, so the cross-agent read that the
+    # shared executor above can only call "advisory" becomes ENOENT — absent from the
+    # namespace, not merely forbidden by policy.
+    #
+    # WHY IT HOLDS THE SOCKET. Per-agent means containers on demand, and the backend
+    # deliberately cannot create containers here: docker-socket-proxy below is
+    # POST=1 + ALLOW_RESTARTS=1 because CONTAINERS=1 carries no method filter and
+    # would open create/delete/exec on ANY container on the host. This service exists
+    # so that rule survives. NEVER "fix" per-agent executors by adding CONTAINERS=1.
+    #
+    # >> NEVER ADD exec-net TO THIS SERVICE. On a shared network a compromised agent
+    # >> shell could call /ensure with a PEER's agentId, get a container mounting that
+    # >> peer's directory on a network it can already reach, and drive it —
+    # >> reconstructing the exact cross-agent read this rung exists to prevent,
+    # >> through the component built to prevent it. sup-net, and nothing else.
+    #
+    # SPIKE, NOT A SHIP — INERT ON A DEFAULT INSTALL, via two independent gates:
+    # profiles-gated (so a default `docker compose up -d` never resolves it, and no
+    # image is pulled) AND the backend's SHELL_SUPERVISOR_URL below ships EMPTY
+    # (empty => the shared-executor path verbatim). Both must be flipped. Holding the
+    # Docker socket puts this in the TRUSTED tier — a supervisor compromise is
+    # equivalent to host compromise; see SECURITY_MODEL.md "Trusted" item 2b.
+    #
+    # No new secret: it reuses SHELL_EXECUTOR_SECRET as the ROOT, and hands each
+    # executor only HMAC(root, itsOwnAgentId) so one cannot sign for a peer.
+    profiles: ["h35"]
+    image: ghcr.io/${GHCR_OWNER}/damn-dev-shell-supervisor:latest
+    restart: unless-stopped
+    environment:
+      SHELL_EXECUTOR_SECRET: ${SHELL_EXECUTOR_SECRET}
+      SHELL_SUPERVISOR_PORT: "9001"
+      SHELL_EXECUTOR_IMAGE: ghcr.io/${GHCR_OWNER}/damn-dev-shell-executor:latest
+      # Compose prefixes networks with the project name; executors are created through
+      # the Docker API, not by compose, so the real name is needed here.
+      EXEC_NETWORK: ${COMPOSE_PROJECT_NAME:-damn-dev}_exec-net
+      # HOST path — bind sources are resolved by the daemon, not inside this
+      # container. Only <this>/<agentId> is ever mounted, never the parent.
+      AGENTS_HOST_DIR: /root/.openclaw/agents
+      AGENTS_CONTAINER_DIR: /home/node/.openclaw/agents
+    networks:
+      - sup-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   egress-proxy:
     # Sovereign egress proxy (H1 / Reliability ladder R2 — ee/, entitlement-gated).
     # Derives each connection's destination host (HTTP CONNECT / TLS SNI), asks the
@@ -524,6 +573,13 @@ services:
       DAMNDEV_CONTAINERIZED: "true"
       SHELL_EXECUTOR_URL: http://shell-executor:9000
       SHELL_EXECUTOR_SECRET: ${SHELL_EXECUTOR_SECRET}
+      # H3.5 per-agent executors (SPIKE). SHIPS EMPTY, and that is the whole
+      # inert-by-default property: empty => ContainerExecutor takes the shared-executor
+      # path verbatim and never calls a supervisor. DISTINCT from SHELL_EXECUTOR_URL
+      # above — that names the shared service; this switches the resolution MODE to
+      # per-agent. Setting it without starting the h35 profile is fail-closed, not
+      # fail-open: every shell call is refused because no supervisor answers /ensure.
+      SHELL_SUPERVISOR_URL: ${SHELL_SUPERVISOR_URL:-}
       DAMNDEV_INSTALL_PATH: docker-vps
       DAMN_DEV_VERSION_URL: https://damn.dev/version.json
       OPENCLAW_CONTAINER_NAME: ${OPENCLAW_CONTAINER_NAME:-openclaw}
@@ -567,6 +623,10 @@ services:
       - proxy-net
       - exec-net
       - egress-net
+      # H3.5: reaches shell-supervisor. Harmless while the h35 profile is off — an
+      # empty internal network with one member. The backend is the ONLY service that
+      # may be on both this and exec-net; the supervisor must never be on exec-net.
+      - sup-net
     volumes:
       - damn_db:/data
       - /root/.openclaw:/home/node/.openclaw
@@ -653,6 +713,11 @@ networks:
     internal: true
   exec-net:
     internal: true
+  # Private backend<->shell-supervisor link (H3.5). Its whole job is to be a network
+  # executors are NOT on: the supervisor can mint a container mounting any agent's
+  # directory, so an executor that could reach it could ask for a peer's.
+  sup-net:
+    internal: true
   # Private backend↔egress-proxy link (H1). internal:true: nothing routes off-box
   # over it — the proxy's own internet egress rides the default (NAT) network.
   egress-net:
@@ -726,6 +791,51 @@ if [[ -n "$EE_REGISTRY_USERNAME" ]]; then
   info "Delivering enterprise modules..."
   docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" --profile ee up -d ee-loader \
     || die "Could not pull the enterprise modules from registry.damn.dev. The credential authenticated, so this is likely a network or registry issue — re-run once it is reachable."
+fi
+
+# ── Block the cloud metadata endpoint for containers ────────────────────────
+#
+# 169.254.169.254 exists on EVERY cloud VPS. On Hetzner it serves this instance's
+# cloud-init; on AWS it serves IAM role credentials outright. An agent that reaches
+# it — via a redirect its browser followed, or a shell command — reads whatever the
+# provider puts there. `assertSafeUrl` guards the app layer; this is the layer
+# beneath it, so a caller nobody has thought of yet is covered too.
+#
+# FOUR THINGS, each verified on a live box (2026-08-24) rather than assumed:
+#  • IPv4 ONLY. Never ip6tables/fe80::/10 — IPv6 neighbour discovery needs it.
+#  • DOCKER-USER sits in FORWARD, so it filters CONTAINER traffic and leaves the
+#    host alone — the host's own cloud-init still reaches metadata normally.
+#  • REJECT, not DROP: an agent's attempt fails in ~8ms instead of hanging for the
+#    full timeout and reading as a network fault.
+#  • Docker's embedded DNS is 127.0.0.11, not link-local, so nothing resolves through
+#    this rule.
+#
+# systemd rather than a bare iptables call because DOCKER-USER only exists after
+# dockerd starts, and a rule applied once vanishes on the next reboot — a security
+# control that silently disables itself is worse than one that was never added.
+if command -v iptables &>/dev/null && command -v systemctl &>/dev/null; then
+  info "Blocking cloud metadata (169.254.0.0/16) for containers..."
+  cat > /etc/systemd/system/damndev-block-linklocal.service <<'UNIT'
+[Unit]
+Description=Block cloud metadata (169.254.0.0/16) for containers
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# -C first so a re-run does not stack duplicate rules.
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.0.0/16 -j REJECT --reject-with icmp-admin-prohibited 2>/dev/null || iptables -I DOCKER-USER -d 169.254.0.0/16 -j REJECT --reject-with icmp-admin-prohibited'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  # Never fatal: a host without a DOCKER-USER chain (rootless, nftables-only, an
+  # unusual distro) still gets a working install — it just keeps app-layer guarding
+  # only. Failing the whole install over defence-in-depth would be the wrong trade.
+  systemctl enable --now damndev-block-linklocal 2>/dev/null \
+    || warn "Could not apply the metadata block (no DOCKER-USER chain?). The app-layer guard still applies; see CLAUDE.md."
 fi
 
 docker compose -f "$INSTALL_DIR/docker-compose.prod.yml" --env-file "$INSTALL_DIR/.env" up -d
