@@ -338,6 +338,10 @@ write_openclaw_config() {
     },
     "list": []
   },
+  "skills": {
+    "workshop": { "autonomous": { "enabled": false }, "approvalPolicy": "pending" }
+  },
+  "update": { "checkOnStart": false, "auto": { "enabled": false } },
   "hooks": {
     "allowedAgentIds": [],
     "token": "${OPENCLAW_TOKEN}"
